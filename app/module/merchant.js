@@ -16,8 +16,30 @@
 
     // 開いている露店を閉じる
     Merchant.prototype.closeStand = function () {
-        if (character.stand) close_stand();
+        if (character.stand) return close_stand();
     };
+
+    // 定期的な在庫確認を開始する
+    Merchant.prototype.startRestockRoutine = function () {
+        if (!Array.isArray(this.options.restockItems) || !this.options.restockItems.length) return;
+        var self = this;
+        root.App.Common.startRestockRoutine({
+            id: "merchant-restock-" + character.name,
+            items: this.options.restockItems,
+            // 商人の他作業中は補充を待ち、補充中はbusy状態にする
+            canRun: function () { return !self.busy && character.ctype === "merchant"; },
+            onStart: function () {
+                self.busy = true;
+                root.App.Common.log("商人の在庫補充を開始します", "cyan");
+            },
+            onFinish: function () { self.busy = false; },
+            beforeMove: function () { return self.closeStand(); },
+            afterReturn: function () {
+                return new Promise(function (resolve) { self.openStandAndStock(resolve); });
+            }
+        });
+    };
+
 
     // 露店を開き、設定された各出品枠に商品と価格を登録する
     Merchant.prototype.openStandAndStock = function (done) {
@@ -94,10 +116,155 @@
         }, 600);
     };
 
+    // ホーム帰還後に露店準備、売却、強化、合成を共通の順序で実行する
+    Merchant.prototype.processAtHome = function (done) {
+        var self = this;
+        // 露店の初期化後に売却、強化、合成を続ける
+        this.openStandAndStock(function () {
+            self.sellWhitelistedItems();
+            // 強化が完了したら設定済みアイテムの合成を始める
+            root.App.Items.upgradeWhitelist(self.options.upgradeItems, function (upgradeOk) {
+                if (!upgradeOk) root.App.Common.log("装備強化を中断しました", "orange");
+                root.App.Items.compoundAll({
+                    maxLevel: self.options.maxCombineLevel,
+                    scrollName: self.options.compoundScroll
+                // 合成終了後にホーム待機状態を通知し、呼び出し元へ完了を返す
+                }, function () {
+                    set_message("Open Stand (Idle)");
+                    root.App.Common.log("ホームでのアイテム整理が完了し、露店で待機します", "green");
+                    if (done) done();
+                });
+            });
+        });
+    };
+
+    // 要求された品の所持数を確認し、依頼者へ届けてからホームへ戻る
+    Merchant.prototype.deliverRequestedItems = function (name, data) {
+        var self = this;
+        var home = this.options.homePosition;
+        if (typeof data.map !== "string" || typeof data.x !== "number" ||
+            typeof data.y !== "number" || !Array.isArray(data.items) ||
+            !home || typeof home.map !== "string" ||
+            typeof home.x !== "number" || typeof home.y !== "number") {
+            root.App.Common.log("アイテム受け渡し依頼またはホームポジションの設定が不正です", "red");
+            return;
+        }
+        if (this.busy) {
+            root.App.Common.log("作業中のためアイテム受け渡し依頼をスキップしました", "gray");
+            return;
+        }
+
+        // 商人の所持品から要求数を満たす商品だけを配送対象にする
+        var deliveries = data.items.filter(function (entry) {
+            if (!entry || typeof entry.itemName !== "string" ||
+                !Number.isInteger(entry.quantity) || entry.quantity < 1) return false;
+            var held = root.App.Common.getItemQuantity(entry.itemName);
+            if (held < entry.quantity) {
+                root.App.Common.log(entry.itemName + " が不足しています（必要: " +
+                    entry.quantity + "、所持: " + held + "）", "orange");
+                return false;
+            }
+            return true;
+        });
+        if (!deliveries.length) return;
+
+        this.busy = true;
+
+        // 依頼者の場所へ移動して、指定された商品を順番に送る
+        function sendDeliveries(index) {
+            if (index >= deliveries.length) return Promise.resolve();
+            var delivery = deliveries[index];
+            var remaining = delivery.quantity;
+            var usedSlots = [];
+
+            // 複数スタックに分かれた場合も要求数を満たすまで順番に送る
+            function sendStack() {
+                if (remaining <= 0) {
+                    root.App.Common.log(name + " に " + delivery.itemName +
+                        " x" + delivery.quantity + " を渡しました", "green");
+                    return sendDeliveries(index + 1);
+                }
+                var slot = -1;
+                for (var i = 0; i < character.items.length; i++) {
+                    if (character.items[i] && character.items[i].name === delivery.itemName &&
+                        usedSlots.indexOf(i) < 0) {
+                        slot = i;
+                        break;
+                    }
+                }
+                if (slot < 0) throw new Error(delivery.itemName + " の配送中に所持数が不足しました");
+                var stackQuantity = character.items[slot].q || 1;
+                var sendQuantity = Math.min(remaining, stackQuantity);
+                usedSlots.push(slot);
+                remaining -= sendQuantity;
+                return Promise.resolve(send_item(name, slot, sendQuantity)).then(function (result) {
+                    if (result && result.failed) throw result;
+                    return sendStack();
+                });
+            }
+            return sendStack();
+        }
+
+        // ゲームのコールバック式またはPromise式の移動完了を待つ
+        function moveTo(position) {
+            return new Promise(function (resolve, reject) {
+                var settled = false;
+
+                // 移動結果を一度だけ確定する
+                function finish(error) {
+                    if (settled) return;
+                    settled = true;
+                    if (error) reject(error);
+                    else resolve();
+                }
+
+                try {
+                    // ゲームの移動完了コールバックは成功値を渡す場合があるため引数をエラー扱いしない
+                    var movement = smart_move(position, function () { finish(); });
+                    if (movement && typeof movement.then === "function") {
+                        movement.then(function () { finish(); }, finish);
+                    }
+                } catch (error) {
+                    finish(error);
+                }
+            });
+        }
+
+        // 配送後はホームへ帰り、露店を元の待機状態へ戻す
+        function returnHome(error) {
+            if (error) root.App.Common.log("アイテム配送に失敗しました: " +
+                root.App.Common.formatError(error), "red");
+            return moveTo(home).then(function () {
+                return new Promise(function (resolve) {
+                    self.processAtHome(function () {
+                        self.busy = false;
+                        resolve();
+                    });
+                });
+            }, function (moveError) {
+                root.App.Common.log("配送後にホームへ戻れませんでした: " +
+                    root.App.Common.formatError(moveError), "red");
+                self.busy = false;
+            }).then(function () {
+                if (self.busy) self.busy = false;
+            });
+        }
+
+        root.App.Common.log(name + " へアイテムを届けます", "cyan");
+        Promise.resolve(this.closeStand()).then(function () {
+            return moveTo({ map: data.map, x: data.x, y: data.y });
+        }).then(function () { return sendDeliveries(0); })
+            .then(function () { return returnHome(); }, returnHome);
+    };
+
     // 指定キャラクターからの回収依頼を検証し、商人作業を順番に実行する
     Merchant.prototype.onCM = function (name, data) {
         var self = this;
         var allowedSenders = root.App.Common.getAllowedSenders();
+        if (allowedSenders.indexOf(name) >= 0 && data && data.task === "deliver_items") {
+            this.deliverRequestedItems(name, data);
+            return;
+        }
         if (allowedSenders.indexOf(name) < 0 || !data || data.task !== "loot_me") return;
         if (this.busy) {
             root.App.Common.log("作業中のため要請をスキップしました", "gray");
@@ -131,25 +298,9 @@
             setTimeout(function () {
                 set_message("Returning...");
 
-                // 町への帰還後に露店、売却、強化、合成を順に実行する
+                // ホーム帰還後の共通アイテム整理処理を実行する
                 smart_move(home, function () {
-                    // 露店の初期化が終わってから売却・強化・合成を始める
-                    self.openStandAndStock(function () {
-                        self.sellWhitelistedItems();
-                        // 強化完了後に合成処理へ進む
-                        root.App.Items.upgradeWhitelist(self.options.upgradeItems, function (upgradeOk) {
-                            if (!upgradeOk) root.App.Common.log("装備強化を中断しました", "orange");
-                            root.App.Items.compoundAll({
-                                maxLevel: self.options.maxCombineLevel,
-                                scrollName: self.options.compoundScroll
-                                // 合成完了後に待機状態へ戻す
-                            }, function () {
-                                set_message("Open Stand (Idle)");
-                                root.App.Common.log("露店を開いて次回要請まで待機します", "green");
-                                finish();
-                            });
-                        });
-                    });
+                    self.processAtHome(finish);
                 });
             }, self.options.pickupDelay);
         });

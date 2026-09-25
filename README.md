@@ -35,6 +35,7 @@ VirtualBox 上の Webサーバー が `app/` を読み取り専用で配信し�
 - 冒険者設定の `test1` を実際の商人キャラクター名に変更する
 - 各キャラクターの `homePosition` を移動先の `{ map, x, y }` に変更する
 - 売却・強化・露店・受け渡しなどのアイテム設定を確認する
+- 冒険者から補充を頼む商品は `requestItems` に `{ itemName, threshold, quantity }` の配列で設定する（複数可。閾値以下で商人へ依頼し、未補充なら `merchantTimeout` 後に再依頼）
 - 自動戦闘を使う場合は `combat.enabled` を `true` にし、クラスに合った `mode` と対象条件を設定する
 
 ## サーバーの起動
@@ -86,6 +87,7 @@ eval(loadSnippet);
 - `meritem`: `accessoryTypes` のアイテムを合成
 - `open` / `close`: 商人キャラクターの露店を操作
 - 露店商品は `standListings` の `itemName`、`slot`、`price`、`quantity` で個別に指定できます。`quantity` は省略時1個で、指定数が所持数を超える出品はスキップします
+- 商人の補充商品は `restockItems` に複数設定できます。所持数が `threshold` 以下になると `quantity` 個を購入し、必要な場合は商品ごとの `position` へ移動してから元の位置へ戻ります。確認はモジュール内で1分ごとに行います
 - 冒険者の自動戦闘モードは `combat.mode` で選択
 - ホーム移動ボタンは各キャラクターの `homePosition` を参照
 
@@ -111,7 +113,7 @@ AdventureLandTheCodeMMORPG/
         ├── common.js           # 共通処理、定期実行、ホーム移動
         ├── items.js            # アイテム操作
         ├── interface.js        # ゲーム画面の共通インターフェース
-        ├── merchant.js         # 商人の露店・回収処理
+        ├── merchant.js         # 商人の露店・回収・在庫補充処理
         ├── adventurer.js       # 冒険者の回復・回収・商人連携
         └── combat.js           # 戦闘対象選択と位置戦略
 ```

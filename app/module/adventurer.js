@@ -13,6 +13,7 @@
             ? root.App.Combat.create(this.settings.combat || {}) : null;
         this.callingMerchant = false;
         this.lastMerchantCallTime = 0;
+        this.merchantRequestType = null;
         this.deliveryInProgress = false;
         this.deliveryRetryAfter = 0;
     }
@@ -35,6 +36,7 @@
             if (index >= slots.length) {
                 self.deliveryInProgress = false;
                 self.callingMerchant = false;
+                self.merchantRequestType = null;
                 return true;
             }
             var slot = slots[index];
@@ -54,6 +56,7 @@
         return Promise.resolve(sendNext(0)).then(null, function (error) {
             self.deliveryInProgress = false;
             self.callingMerchant = false;
+            self.merchantRequestType = null;
             var reason = error && (error.reason || error.response || error.message);
             if (String(reason || error).toLowerCase().indexOf("send_no_space") >= 0) {
                 self.deliveryRetryAfter = Date.now() + DELIVERY_RETRY_INTERVAL;
@@ -72,16 +75,60 @@
         var merchantName = settings.merchantCharacter;
         var now = Date.now();
         if (now < this.deliveryRetryAfter) return;
-        if (this.callingMerchant && now - this.lastMerchantCallTime > settings.merchantTimeout) {
+        var requestItems = Array.isArray(settings.requestItems) ? settings.requestItems : [];
+        // 設定したアイテムの所持数が受け取り閾値以下か調べる
+        var neededItems = requestItems.filter(function (entry) {
+            return entry && typeof entry.itemName === "string" &&
+                Number.isInteger(entry.threshold) && entry.threshold >= 0 &&
+                Number.isInteger(entry.quantity) && entry.quantity > 0 &&
+                root.App.Common.getItemQuantity(entry.itemName) <= entry.threshold;
+        });
+        var timeout = typeof settings.merchantTimeout === "number" && settings.merchantTimeout > 0
+            ? settings.merchantTimeout : 5 * 60 * 1000;
+        if (this.callingMerchant && now - this.lastMerchantCallTime >= timeout) {
             root.App.Common.log("商人の呼び出しがタイムアウトしたため、再要請できる状態に戻します", "orange");
             this.callingMerchant = false;
             this.lastMerchantCallTime = 0;
+            this.merchantRequestType = null;
+        }
+
+        if (requestItems.length) {
+            if (!neededItems.length) {
+                var completedRequest = this.merchantRequestType === "deliver_items";
+                this.callingMerchant = false;
+                this.lastMerchantCallTime = 0;
+                this.merchantRequestType = null;
+                if (completedRequest) return;
+            } else {
+                if (this.callingMerchant || this.deliveryInProgress) return;
+                this.callingMerchant = true;
+                this.lastMerchantCallTime = now;
+                this.merchantRequestType = "deliver_items";
+                root.App.Common.log("不足アイテムを商人に依頼します", "yellow");
+                // 閾値以下の商品名と受け取り数、現在位置を商人へ送信する
+                return send_cm(merchantName, {
+                    task: "deliver_items",
+                    // 必要な設定から商品名と受け取り数だけを依頼データにする
+                    items: neededItems.map(function (entry) {
+                        return { itemName: entry.itemName, quantity: entry.quantity };
+                    }),
+                    map: character.map,
+                    x: character.x,
+                    y: character.y
+                }).then(null, function (error) {
+                    self.callingMerchant = false;
+                    self.lastMerchantCallTime = 0;
+                    self.merchantRequestType = null;
+                    throw error;
+                });
+            }
         }
 
         var merchant = get_player(merchantName);
         if (merchant && merchant.map === character.map &&
             parent.distance(character, merchant) < settings.merchantDistance) {
             if (this.deliveryInProgress) return;
+            if (this.merchantRequestType === "deliver_items") return;
             this.callingMerchant = false;
             return this.deliverItems();
         }
@@ -89,6 +136,7 @@
         if (character.esize <= settings.merchantCallThreshold && !this.callingMerchant) {
             this.callingMerchant = true;
             this.lastMerchantCallTime = now;
+            this.merchantRequestType = "loot_me";
             root.App.Common.log("商人を呼び出します: " + merchantName, "yellow");
             // 呼び出し送信に失敗したら次回監視で再要請できるよう状態を戻す
             return send_cm(merchantName, {
@@ -99,6 +147,7 @@
             }).then(null, function (error) {
                 self.callingMerchant = false;
                 self.lastMerchantCallTime = 0;
+                self.merchantRequestType = null;
                 throw error;
             });
         }
