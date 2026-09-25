@@ -85,6 +85,7 @@ eval(loadSnippet);
 - `upitem`: `upgradeItems` に登録したアイテムを強化
 - `meritem`: `accessoryTypes` のアイテムを合成
 - `open` / `close`: 商人キャラクターの露店を操作
+- 露店商品は `standListings` の `itemName`、`slot`、`price`、`quantity` で個別に指定できます。`quantity` は省略時1個で、指定数が所持数を超える出品はスキップします
 - 冒険者の自動戦闘モードは `combat.mode` で選択
 - ホーム移動ボタンは各キャラクターの `homePosition` を参照
 

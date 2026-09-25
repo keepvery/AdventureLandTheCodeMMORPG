@@ -33,10 +33,10 @@ window.CONFIG = {
                     sshield: 4,
                     mushroomstaff: 5 // キノコ杖
                 },
-                // slot は露店側の出品枠、price は販売価格
+                // itemName は商品名、slot は露店側の出品枠、price は販売価格、quantity は出品個数
                 standListings: [
-                    { slot: 1, price: 99999999 },
-                    // { slot: 2, price: 99999999 }
+                    { slot: 1, itemName: "cclaw", price: 99999999, quantity: 5 },
+                    { slot: 2, itemName: "wcap", price: 99999999, quantity: 1 }
                 ],
                 pickupDelay: 5000,
                 // ホームポジションの座標
