@@ -94,11 +94,13 @@
 
         if (requestItems.length) {
             if (!neededItems.length) {
-                var completedRequest = this.merchantRequestType === "deliver_items";
-                this.callingMerchant = false;
-                this.lastMerchantCallTime = 0;
-                this.merchantRequestType = null;
-                if (completedRequest) return;
+                // 補充依頼だけを解除し、別タスクの商人呼び出し状態は保持する
+                if (this.merchantRequestType === "deliver_items") {
+                    this.callingMerchant = false;
+                    this.lastMerchantCallTime = 0;
+                    this.merchantRequestType = null;
+                    return;
+                }
             } else {
                 if (this.callingMerchant || this.deliveryInProgress) return;
                 this.callingMerchant = true;
