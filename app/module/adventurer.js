@@ -2,6 +2,7 @@
 (function (root) {
     "use strict";
     root.App = root.App || {};
+    var DELIVERY_RETRY_INTERVAL = 5 * 60 * 1000;
 
     // 冒険者の戦闘・商人連携設定と実行状態を保持する
     function Adventurer(settings) {
@@ -13,6 +14,7 @@
         this.callingMerchant = false;
         this.lastMerchantCallTime = 0;
         this.deliveryInProgress = false;
+        this.deliveryRetryAfter = 0;
     }
 
     // 設定されたアイテムを商人へ順番に送り、完了状態を更新する
@@ -52,6 +54,13 @@
         return Promise.resolve(sendNext(0)).then(null, function (error) {
             self.deliveryInProgress = false;
             self.callingMerchant = false;
+            var reason = error && (error.reason || error.response || error.message);
+            if (String(reason || error).toLowerCase().indexOf("send_no_space") >= 0) {
+                self.deliveryRetryAfter = Date.now() + DELIVERY_RETRY_INTERVAL;
+                root.App.Common.log("商人のインベントリに空きがないため受け渡しを中断しました。" +
+                    Math.ceil(DELIVERY_RETRY_INTERVAL / 60000) + "分後に再試行します", "orange");
+                return false;
+            }
             throw error;
         });
     };
@@ -62,6 +71,7 @@
         var settings = this.settings;
         var merchantName = settings.merchantCharacter;
         var now = Date.now();
+        if (now < this.deliveryRetryAfter) return;
         if (this.callingMerchant && now - this.lastMerchantCallTime > settings.merchantTimeout) {
             root.App.Common.log("商人の呼び出しがタイムアウトしたため、再要請できる状態に戻します", "orange");
             this.callingMerchant = false;
