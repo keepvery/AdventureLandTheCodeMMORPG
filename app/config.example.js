@@ -38,6 +38,15 @@ window.CONFIG = {
                     { slot: 1, itemName: "cclaw", price: 99999999, quantity: 5 },
                     { slot: 2, itemName: "wcap", price: 99999999, quantity: 1 }
                 ],
+                // 在庫が閾値以下なら購入する商品（position は商品ごとの購入場所）
+                restockItems: [
+                    {
+                        itemName: "hpot0",
+                        threshold: 5000,
+                        quantity: 4999,
+                        position: { map: "main", x: -195, y: 91 }
+                    }
+                ],
                 pickupDelay: 5000,
                 // ホームポジションの座標
                 homePosition: { map: "main", x: -136, y: -45 },
@@ -58,10 +67,15 @@ window.CONFIG = {
                 merchantCharacter: "test1",
                 // 空き枠がこの数以下になったら商人を呼び出す
                 merchantCallThreshold: 5,
-                // 商人の応答を待つ時間（5分）※ループ時間
+                // 依頼後に未補充なら再依頼するまでの時間（5分）
                 merchantTimeout: 5 * 60 * 1000,
                 // 商人がこの距離以内に来たらアイテムを渡す
                 merchantDistance: 300,
+                // 閾値以下なら商人に受け取りを依頼する商品（アイテム名, 閾値, 要求数）
+                requestItems: [
+                    { itemName: "hpot0", threshold: 100, quantity: 500 },
+                    { itemName: "mpot0", threshold: 100, quantity: 500 }
+                ],
                 // 商人の位置とインベントリを確認する間隔
                 merchantCheckInterval: 1000,
                 // 商人に渡さないアイテム名のブラックリスト（例: ["hpot0", "mpot0"]）
