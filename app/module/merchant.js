@@ -40,32 +40,49 @@
                 var listing = listings[j];
                 if (!listing || typeof listing.slot !== "number" ||
                     listing.slot < 1 || listing.slot > 16 ||
-                    typeof listing.price !== "number" || listing.price <= 0) {
-                    root.App.Common.log("露店出品設定が不正です（設定番号: " + j + "）", "red");
+                    typeof listing.itemName !== "string" || !listing.itemName ||
+                    typeof listing.price !== "number" || listing.price <= 0 ||
+                    (listing.quantity !== undefined && (!Number.isInteger(listing.quantity) || listing.quantity < 1))) {
+                    root.App.Common.log("露店出品設定の slot、itemName、price、quantity（省略可）を確認してください（設定番号: " + j + "）", "red");
                     continue;
                 }
 
+                var quantity = listing.quantity || 1;
                 var tradeSlot = "trade" + listing.slot;
-                if (character.slots && character.slots[tradeSlot]) continue;
+                var existingListing = character.slots && character.slots[tradeSlot];
+                if (existingListing) {
+                    if (existingListing.name !== listing.itemName) {
+                        root.App.Common.log("露店枠 " + listing.slot + " には " + existingListing.name +
+                            " が残っています。設定商品 " + listing.itemName + " に変更するには、ゲーム内で既存出品を取り下げてください", "orange");
+                    }
+                    continue;
+                }
 
                 var itemSlot = -1;
                 for (var i = 0; i < character.items.length; i++) {
                     var item = character.items[i];
                     if (!item || usedInventorySlots.indexOf(i) >= 0) continue;
+                    if (item.name !== listing.itemName) continue;
                     if (item.name === "stand0" || item.name === self.options.compoundScroll) continue;
                     itemSlot = i;
                     break;
                 }
 
                 if (itemSlot < 0) {
-                    root.App.Common.log("出品できるアイテムがなくなりました", "orange");
-                    break;
+                    root.App.Common.log("出品アイテム " + listing.itemName + " がありません（露店枠 " + listing.slot + "）", "orange");
+                    continue;
+                }
+
+                var availableQuantity = character.items[itemSlot].q || 1;
+                if (quantity > availableQuantity) {
+                    root.App.Common.log("出品アイテム " + listing.itemName + " の所持数が不足しています（指定: " + quantity + "、所持: " + availableQuantity + "）", "orange");
+                    continue;
                 }
 
                 var itemName = character.items[itemSlot].name;
-                trade(itemSlot, listing.slot, listing.price, 1);
+                trade(itemSlot, listing.slot, listing.price, quantity);
                 usedInventorySlots.push(itemSlot);
-                root.App.Common.log(itemName + " を露店枠 " + listing.slot +
+                root.App.Common.log(itemName + " x" + quantity + " を露店枠 " + listing.slot +
                     " に " + listing.price + " gold で出品しました", "gold");
                 listed++;
             }
