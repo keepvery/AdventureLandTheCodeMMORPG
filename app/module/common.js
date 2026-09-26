@@ -6,6 +6,30 @@ window.__APP_ROUTINE_TIMERS = window.__APP_ROUTINE_TIMERS || {};
 window.__APP_RESTOCK_STATES = window.__APP_RESTOCK_STATES || {};
 var APP_RESTOCK_CHECK_INTERVAL = 60 * 1000;
 var APP_RESTOCK_FAILURE_COOLDOWN = 5 * 60 * 1000;
+
+// 共通設定と個別設定を再帰的に合成し、新しい設定オブジェクトを返す
+function mergeAppSettings(base, override) {
+    var merged = {};
+    var baseSettings = base && typeof base === "object" && !Array.isArray(base) ? base : {};
+    var overrideSettings = override && typeof override === "object" && !Array.isArray(override)
+        ? override : {};
+    Object.keys(baseSettings).forEach(function (key) {
+        merged[key] = baseSettings[key];
+    });
+    Object.keys(overrideSettings).forEach(function (key) {
+        var baseValue = baseSettings[key];
+        var overrideValue = overrideSettings[key];
+        if (baseValue && overrideValue && typeof baseValue === "object" &&
+            typeof overrideValue === "object" && !Array.isArray(baseValue) &&
+            !Array.isArray(overrideValue)) {
+            merged[key] = mergeAppSettings(baseValue, overrideValue);
+        } else {
+            merged[key] = overrideValue;
+        }
+    });
+    return merged;
+}
+
 App.Common = {
     // エラー値からゲームログに表示できる文字列を取り出す
     formatError: function (error) {
@@ -18,6 +42,16 @@ App.Common = {
         } catch (formatError) {
             return String(error);
         }
+    },
+
+    // 共通設定を基準に現在キャラクターの個別設定と呼び出し元の指定を重ねる
+    getSettings: function (characterName, overrides) {
+        var config = window.CONFIG || {};
+        var name = characterName || (typeof character !== "undefined" && character.name);
+        var characterConfig = config.CHARACTERS && config.CHARACTERS[name];
+        var commonSettings = config.COMMON_SETTINGS || {};
+        var characterSettings = characterConfig && characterConfig.settings || {};
+        return mergeAppSettings(mergeAppSettings(commonSettings, characterSettings), overrides);
     },
 
     // 指定された共通処理を設定間隔で実行し、同じIDの既存ループを置き換える
@@ -218,9 +252,7 @@ App.Common = {
 
     // 現在のキャラクター設定にあるホームポジションへ移動する
     moveHome: function () {
-        var config = window.CONFIG || {};
-        var characterConfig = config.CHARACTERS && config.CHARACTERS[character.name];
-        var settings = characterConfig && characterConfig.settings || {};
+        var settings = App.Common.getSettings();
         var home = settings.homePosition;
         if (!home || typeof home.map !== "string" ||
             typeof home.x !== "number" || typeof home.y !== "number") {
@@ -266,8 +298,7 @@ App.Common = {
     getAllowedSenders: function () {
         if (!window.CONFIG || !CONFIG.CHARACTERS) return [];
         var entries = Array.isArray(CONFIG.CHARACTERS) ? CONFIG.CHARACTERS : Object.keys(CONFIG.CHARACTERS);
-        var characterConfig = CONFIG.CHARACTERS[character.name];
-        var settings = characterConfig && characterConfig.settings || {};
+        var settings = App.Common.getSettings();
         var excluded = Array.isArray(settings.excludedSenders) ? settings.excludedSenders : [];
         // 自分自身と設定で除外したキャラクターを候補から外す
         return entries.filter(function (name) {
@@ -289,12 +320,13 @@ App.Common = {
 
     // 共通コマンドを処理し、キャラクター固有コマンドは登録済みハンドラーへ渡す
     handleCommand: function (command, options) {
-        var settings = options || {};
-        if (command === "items") {
+        var settings = App.Common.getSettings(character.name, options);
+        var normalizedCommand = String(command || "").replace(/^\/+/, "").toLowerCase();
+        if (normalizedCommand === "items") {
             show_json(character.items);
             return true;
         }
-        if (command === "upitem") {
+        if (normalizedCommand === "upitem") {
             if (!App.Items || typeof App.Items.upgradeWhitelist !== "function") {
                 App.Common.log("アイテムモジュールが読み込まれていません", "red");
                 return true;
@@ -304,7 +336,7 @@ App.Common = {
             });
             return true;
         }
-        if (command === "meritem") {
+        if (normalizedCommand === "meritem") {
             if (typeof settings.maxCombineLevel !== "number" || !settings.compoundScroll || !Array.isArray(settings.accessoryTypes)) {
                 App.Common.log("maxCombineLevel、compoundScroll、accessoryTypes を設定してください", "red");
                 return true;
@@ -325,7 +357,27 @@ App.Common = {
             });
             return true;
         }
-        var handler = settings.handlers && settings.handlers[command];
+        if (normalizedCommand === "goitem") {
+            if (!App.Items || typeof App.Items.startConfiguredRoutine !== "function") {
+                App.Common.log("アイテムモジュールが読み込まれていません", "red");
+                return true;
+            }
+            // 現在キャラクターの設定でアイテム整理ループを開始する
+            App.Items.startConfiguredRoutine(settings);
+            return true;
+        }
+        if (normalizedCommand === "xyn") {
+            if (!App.Items || typeof App.Items.exchangeWhitelist !== "function") {
+                App.Common.log("アイテムモジュールが読み込まれていません", "red");
+                return true;
+            }
+            App.Items.exchangeWhitelist(settings.exchangeItems, function (ok) {
+                App.Common.log(ok ? "Xyn交換処理が完了しました" : "Xyn交換処理を中断しました",
+                    ok ? "green" : "orange");
+            });
+            return true;
+        }
+        var handler = settings.handlers && settings.handlers[normalizedCommand];
         if (typeof handler === "function") {
             handler();
             return true;

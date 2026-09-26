@@ -6,6 +6,12 @@ window.CONFIG = {
     // 全キャラクターに共通で先に読み込むモジュール
     MODULES: ["module/common.js", "module/items.js", "module/interface.js"],
 
+    // 全キャラクターで共有する設定
+    COMMON_SETTINGS: {
+        // /xyn で交換するアイテム名のホワイトリスト
+        exchangeItems: []
+    },
+
      // ゲーム内キャラクター名をキーにし、実行コードと個別設定を登録する
     CHARACTERS: {
         // キャラクター1 (商人キャラクターの設定例)

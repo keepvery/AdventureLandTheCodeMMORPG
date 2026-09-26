@@ -119,21 +119,12 @@
     // ホーム帰還後に露店準備、売却、強化、合成を共通の順序で実行する
     Merchant.prototype.processAtHome = function (done) {
         var self = this;
-        // 露店の初期化後に売却、強化、合成を続ける
+        // 露店の初期化後に共通アイテム処理を開始する
         this.openStandAndStock(function () {
-            self.sellWhitelistedItems();
-            // 強化が完了したら設定済みアイテムの合成を始める
-            root.App.Items.upgradeWhitelist(self.options.upgradeItems, function (upgradeOk) {
-                if (!upgradeOk) root.App.Common.log("装備強化を中断しました", "orange");
-                root.App.Items.compoundAll({
-                    maxLevel: self.options.maxCombineLevel,
-                    scrollName: self.options.compoundScroll
-                // 合成終了後にホーム待機状態を通知し、呼び出し元へ完了を返す
-                }, function () {
-                    set_message("Open Stand (Idle)");
-                    root.App.Common.log("ホームでのアイテム整理が完了し、露店で待機します", "green");
-                    if (done) done();
-                });
+            root.App.Items.runConfiguredOperations(self.options, function () {
+                set_message("Open Stand (Idle)");
+                root.App.Common.log("ホームでのアイテム整理が完了し、露店で待機します", "green");
+                if (done) done();
             });
         });
     };
