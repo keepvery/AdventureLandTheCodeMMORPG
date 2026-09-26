@@ -6,9 +6,7 @@ App.Chara2 = {
 
     // CONFIG から設定を読み込み冒険者の各ループを開始する
     init: function () {
-        var config = window.CONFIG || {};
-        var characterConfig = config.CHARACTERS && config.CHARACTERS[character.name];
-        var settings = (characterConfig && characterConfig.settings) || {};
+        var settings = App.Common.getSettings();
         if (!App.Adventurer || typeof App.Adventurer.create !== "function") {
             App.Common.log("冒険者モジュールが loader.js から読み込まれていません", "red");
             return;

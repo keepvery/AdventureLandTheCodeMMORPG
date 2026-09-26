@@ -7,9 +7,7 @@ App.Chara1 = {
 
     // CONFIG から現在のキャラクター設定を受け取り商人処理を初期化する
     init: function () {
-        var config = window.CONFIG || {};
-        var characterConfig = config.CHARACTERS && config.CHARACTERS[character.name];
-        this.settings = (characterConfig && characterConfig.settings) || {};
+        this.settings = App.Common.getSettings();
         if (!App.Merchant || typeof App.Merchant.create !== "function") {
             App.Common.log("商人モジュールが loader.js から読み込まれていません", "red");
             return;
