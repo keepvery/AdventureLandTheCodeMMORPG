@@ -117,7 +117,17 @@
                     map: character.map,
                     x: character.x,
                     y: character.y
-                }).then(null, function (error) {
+                }).then(function (result) {
+                    var receivers = result && Array.isArray(result.receivers) ? result.receivers : [];
+                    if (receivers.indexOf(merchantName) < 0) {
+                        self.callingMerchant = false;
+                        self.lastMerchantCallTime = 0;
+                        self.merchantRequestType = null;
+                        root.App.Common.log("商人への不足アイテム依頼が届きませんでした: " + merchantName, "red");
+                        return;
+                    }
+                    root.App.Common.log("商人へ不足アイテムを依頼しました: " + merchantName, "cyan");
+                }, function (error) {
                     self.callingMerchant = false;
                     self.lastMerchantCallTime = 0;
                     self.merchantRequestType = null;

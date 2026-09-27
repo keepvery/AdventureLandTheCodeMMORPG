@@ -157,7 +157,10 @@
             }
             return true;
         });
-        if (!deliveries.length) return;
+        if (!deliveries.length) {
+            root.App.Common.log(name + " への依頼品を必要数所持していないため配送できません", "orange");
+            return;
+        }
 
         this.busy = true;
 
@@ -252,7 +255,12 @@
     Merchant.prototype.onCM = function (name, data) {
         var self = this;
         var allowedSenders = root.App.Common.getAllowedSenders();
+        if (data && data.task === "deliver_items" && allowedSenders.indexOf(name) < 0) {
+            root.App.Common.log("許可されていないキャラクターからの補充依頼を無視しました: " + name, "orange");
+            return;
+        }
         if (allowedSenders.indexOf(name) >= 0 && data && data.task === "deliver_items") {
+            root.App.Common.log(name + " から不足アイテム依頼を受信しました", "cyan");
             this.deliverRequestedItems(name, data);
             return;
         }

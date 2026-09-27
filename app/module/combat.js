@@ -73,6 +73,148 @@
         return move(nextX, nextY);
     };
 
+    // パーティメンバーを狙っている敵を優先し、いなければ未交戦の敵を探す
+    Combat.prototype.findTankTarget = function () {
+        var party = get_party() || {};
+        var entities = parent.entities || {};
+        var chosen = null;
+        var chosenPriority = Infinity;
+        var chosenDistance = Infinity;
+        for (var id in entities) {
+            var candidate = entities[id];
+            if (!this.isEligible(candidate)) continue;
+            var targetName = candidate.target;
+            var priority = 2;
+            if (targetName === character.name) priority = 1;
+            else if (targetName && party[targetName]) priority = 0;
+            else if (targetName) continue;
+            var distance = parent.distance(character, candidate);
+            if (priority < chosenPriority ||
+                (priority === chosenPriority && distance < chosenDistance)) {
+                chosen = candidate;
+                chosenPriority = priority;
+                chosenDistance = distance;
+            }
+        }
+        return chosen;
+    };
+
+    // スキルの習得レベルを確認してから使用可能状態を調べる
+    Combat.prototype.canUseSkill = function (skillName) {
+        var skills = typeof G !== "undefined" && G.skills ? G.skills : null;
+        var skill = skills && skills[skillName];
+        if (skill && typeof skill.level === "number" && character.level < skill.level) return false;
+        return can_use(skillName);
+    };
+
+    // パラディンの自己防御と瀕死回復を必要な場合だけ行う
+    Combat.prototype.useTankDefense = function () {
+        if (character.ctype !== "paladin") return;
+        var conditions = character.s || {};
+        var hpRatio = character.max_hp > 0 ? character.hp / character.max_hp : 1;
+        var settings = this.settings.tank || {};
+        var healThreshold = typeof settings.selfHealThreshold === "number"
+            ? settings.selfHealThreshold : 0.45;
+        if (hpRatio <= healThreshold && this.canUseSkill("selfheal")) return use_skill("selfheal");
+        if (!conditions.mshield && !conditions.aether_shield && this.canUseSkill("mshield")) {
+            return use_skill("mshield");
+        }
+        var hasAura = conditions.paladin_aura_bulwark || conditions.paladin_aura_sanctuary ||
+            conditions.paladin_aura_zeal || conditions.paladin_aura_warding;
+        if (!hasAura && this.canUseSkill("paladin_aura")) return use_skill("paladin_aura");
+
+        var party = get_party() || {};
+        var allies = Object.keys(party);
+        var entities = parent.entities || {};
+        for (var i = 0; i < allies.length; i++) {
+            var allyName = allies[i];
+            var ally = party[allyName];
+            if (!ally || allyName === character.name || ally.rip || ally.map !== character.map ||
+                (ally.s && ally.s.guardians_oath)) continue;
+            var allyThreatened = false;
+            for (var id in entities) {
+                var monster = entities[id];
+                if (this.isEligible(monster) && monster.target === allyName) {
+                    allyThreatened = true;
+                    break;
+                }
+            }
+            if (allyThreatened && parent.distance(character, ally) <= 240 && this.canUseSkill("guardians_oath")) {
+                return use_skill("guardians_oath", allyName);
+            }
+        }
+        if (!conditions.beacon_of_resolve && this.canUseSkill("beacon_of_resolve")) {
+            var allyNearby = allies.some(function (name) {
+                var ally = party[name];
+                return ally && !ally.rip && ally.map === character.map &&
+                    parent.distance(character, ally) <= 480;
+            });
+            if (allyNearby) return use_skill("beacon_of_resolve");
+        }
+    };
+
+    // パーティへの脅威を引き受け、脅威がない間はリーダーを追従する
+    Combat.prototype.runTank = function () {
+        var defense = this.useTankDefense();
+        if (defense) return defense;
+        var party = get_party() || {};
+        var members = Object.keys(party);
+        var hasParty = members.some(function (name) { return name !== character.name; });
+        var target = this.findTankTarget();
+
+        // パーティ中は味方を狙う敵か自分を狙う敵がいるときだけ戦闘を優先する
+        if (hasParty && target && target.target) {
+            if (is_in_range(target)) return this.attackTarget(target);
+            var nextX = character.x + (target.x - character.x) / 2;
+            var nextY = character.y + (target.y - character.y) / 2;
+            set_message("Protecting Party");
+            return move(nextX, nextY);
+        }
+
+        // パーティ外では従来どおり近くの敵を探して戦闘する
+        if (!hasParty && target) {
+            if (is_in_range(target)) return this.attackTarget(target);
+            var soloX = character.x + (target.x - character.x) / 2;
+            var soloY = character.y + (target.y - character.y) / 2;
+            set_message("Moving to Target");
+            return move(soloX, soloY);
+        }
+
+        if (hasParty && this.settings.followLeader !== false) {
+            var leaderName = this.settings.leaderCharacter || members[0];
+            // 自分がリーダーなら追従せず、通常どおり敵を探して攻撃する
+            if (leaderName === character.name && target) {
+                if (is_in_range(target)) return this.attackTarget(target);
+                var leaderX = character.x + (target.x - character.x) / 2;
+                var leaderY = character.y + (target.y - character.y) / 2;
+                set_message("Leading Party");
+                return move(leaderX, leaderY);
+            }
+            var leader = party[leaderName];
+            if (!leader || leaderName === character.name || leader.rip) {
+                set_message("Waiting for Party Leader");
+                return;
+            }
+            var followDistance = typeof this.settings.followDistance === "number"
+                ? this.settings.followDistance : 120;
+            var distance = leader.map === character.map
+                ? parent.distance(character, leader) : Infinity;
+            if (distance <= followDistance) {
+                set_message("Following " + leaderName);
+                return;
+            }
+            var now = Date.now();
+            var moveInterval = typeof this.settings.followMoveInterval === "number"
+                ? this.settings.followMoveInterval : 3000;
+            if (now - (this.lastFollowMoveTime || 0) < moveInterval) return;
+            this.lastFollowMoveTime = now;
+            set_message("Following " + leaderName);
+            return smart_move({ map: leader.map, x: leader.x, y: leader.y });
+        }
+
+        set_message("No Party Targets");
+    };
+
     // 設定した複数の定位置を順番に巡回し、各位置で敵を攻撃する
     Combat.prototype.runRotation = function () {
         var settings = this.settings;
@@ -115,6 +257,7 @@
         var mode = this.settings.mode || "stationary";
         if (mode === "stationary") return this.runStationary();
         if (mode === "approach") return this.runApproach();
+        if (mode === "tank") return this.runTank();
         if (mode === "rotate") return this.runRotation();
         set_message("Unknown Combat Mode");
     };
