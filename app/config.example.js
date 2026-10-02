@@ -6,6 +6,13 @@ window.CONFIG = {
     // 全キャラクターに共通で先に読み込むモジュール
     MODULES: ["module/common.js", "module/items.js", "module/interface.js"],
 
+    // アカウント共通の自動PT設定（trueにすると5分ごとに不足メンバーを招待）
+    AUTO_PT: false,
+    // 自動PTを管理するリーダーのキャラクター名
+    PT_LEADER: "test1",
+    // リーダーのPTに加えるキャラクター名
+    PT_MEMBERS: ["test2", "test3", "test4"],
+
     // 全キャラクターで共有する設定
     COMMON_SETTINGS: {
         // /xyn で交換するアイテム名のホワイトリスト

@@ -5,6 +5,7 @@ window.__APP_ROUTINE_TIMERS = window.__APP_ROUTINE_TIMERS || {};
 // 補充処理の待機状態をモジュール再読込後も保持する
 window.__APP_RESTOCK_STATES = window.__APP_RESTOCK_STATES || {};
 var APP_RESTOCK_CHECK_INTERVAL = 60 * 1000;
+var APP_AUTO_PT_CHECK_INTERVAL = 5 * 60 * 1000;
 var APP_RESTOCK_FAILURE_COOLDOWN = 5 * 60 * 1000;
 
 // 共通設定と個別設定を再帰的に合成し、新しい設定オブジェクトを返す
@@ -322,6 +323,112 @@ App.Common = {
         if (typeof game_log === "function") game_log(message, color);
     },
 
+    // AUTO_PT用の共通設定を取得し、リーダーと参加メンバーを検証する
+    getAutoPartySettings: function () {
+        var settings = window.CONFIG || {};
+        if (settings.AUTO_PT !== true) return null;
+        if (typeof settings.PT_LEADER !== "string" || !settings.PT_LEADER ||
+            !Array.isArray(settings.PT_MEMBERS)) {
+            App.Common.log("AUTO_PTにはPT_LEADERとPT_MEMBERSを設定してください", "red");
+            return null;
+        }
+        return settings;
+    },
+
+    // 指定名が現在のPTに参加しているかを取得する
+    isPartyMember: function (party, name) {
+        if (!party) return false;
+        if (Array.isArray(party)) {
+            return party.some(function (member) {
+                return member === name || (member && member.name === name);
+            });
+        }
+        if (party[name]) return true;
+        return Object.keys(party).some(function (key) {
+            return key === name || (party[key] && party[key].name === name);
+        });
+    },
+
+    // リーダーが5分ごとにPTの不足メンバーへ招待を送る
+    startAutoPartyRoutine: function () {
+        var settings = App.Common.getAutoPartySettings();
+        if (!settings) return null;
+        if (character.name !== settings.PT_LEADER) return null;
+        if (typeof get_party !== "function" || typeof send_party_invite !== "function") {
+            App.Common.log("AUTO_PTに必要なゲームAPIを利用できません", "red");
+            return null;
+        }
+        return App.Common.startRoutine({
+            id: "auto-party-" + character.name,
+            interval: APP_AUTO_PT_CHECK_INTERVAL,
+            tasks: [{
+                name: "自動PT",
+                run: function () { return App.Common.syncAutoParty(settings); }
+            }]
+        });
+    },
+
+    // 現在のPTにいない登録メンバーをリーダーが招待する
+    syncAutoParty: function (settings) {
+        if (character.name !== settings.PT_LEADER || character.rip) return;
+        var party = get_party() || {};
+        settings.PT_MEMBERS.forEach(function (name) {
+            if (typeof name !== "string" || !name || name === settings.PT_LEADER ||
+                App.Common.isPartyMember(party, name)) return;
+            try {
+                var invite = send_party_invite(name);
+                if (invite && typeof invite.then === "function") {
+                    invite.then(null, function (error) {
+                        App.Common.log(name + " へのPT招待に失敗しました: " +
+                            App.Common.formatError(error), "orange");
+                    });
+                }
+            } catch (error) {
+                App.Common.log(name + " へのPT招待に失敗しました: " +
+                    App.Common.formatError(error), "orange");
+            }
+        });
+    },
+
+    // 登録メンバーがリーダーから受けたPT招待を自動承認する
+    handleAutoPartyInvite: function (name) {
+        var settings = App.Common.getAutoPartySettings();
+        if (!settings || name !== settings.PT_LEADER ||
+            settings.PT_MEMBERS.indexOf(character.name) < 0 ||
+            typeof accept_party_invite !== "function") return;
+        try {
+            var acceptance = accept_party_invite(name);
+            if (acceptance && typeof acceptance.then === "function") {
+                acceptance.then(null, function (error) {
+                    App.Common.log("PT招待の承認に失敗しました: " +
+                        App.Common.formatError(error), "orange");
+                });
+            }
+        } catch (error) {
+            App.Common.log("PT招待の承認に失敗しました: " +
+                App.Common.formatError(error), "orange");
+        }
+    },
+
+    // 登録メンバーからのPT参加申請をリーダーが自動承認する
+    handleAutoPartyRequest: function (name) {
+        var settings = App.Common.getAutoPartySettings();
+        if (!settings || character.name !== settings.PT_LEADER ||
+            settings.PT_MEMBERS.indexOf(name) < 0 ||
+            typeof accept_party_request !== "function") return;
+        try {
+            var acceptance = accept_party_request(name);
+            if (acceptance && typeof acceptance.then === "function") {
+                acceptance.then(null, function (error) {
+                    App.Common.log("PT参加申請の承認に失敗しました: " +
+                        App.Common.formatError(error), "orange");
+                });
+            }
+        } catch (error) {
+            App.Common.log("PT参加申請の承認に失敗しました: " +
+                App.Common.formatError(error), "orange");
+        }
+    },
     // 共通コマンドを処理し、キャラクター固有コマンドは登録済みハンドラーへ渡す
     handleCommand: function (command, options) {
         var settings = App.Common.getSettings(character.name, options);
@@ -390,3 +497,16 @@ App.Common = {
         return false;
     }
 };
+
+// リーダーからのPT招待を共通処理で受け取る
+window.on_party_invite = function (name) {
+    App.Common.handleAutoPartyInvite(name);
+};
+
+// メンバーからのPT参加申請を共通処理で受け取る
+window.on_party_request = function (name) {
+    App.Common.handleAutoPartyRequest(name);
+};
+
+// 共通設定で有効な場合だけ自動PTの確認ループを開始する
+App.Common.startAutoPartyRoutine();

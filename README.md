@@ -35,6 +35,7 @@ VirtualBox 上の Webサーバー が `app/` を読み取り専用で配信し�
 - 冒険者設定の `test1` を実際の商人キャラクター名に変更する
 - 各キャラクターの `homePosition` を移動先の `{ map, x, y }` に変更する
 - 売却・強化・露店・受け渡しなどのアイテム設定を確認する
+- AUTO_PTを使う場合はCONFIG直下にAUTO_PT: true、PT_LEADERにリーダー名、PT_MEMBERSに参加キャラクター名の配列を設定する（アカウント共通設定のため、キャラクター別settingsでは上書きされません。リーダーが5分ごとに未参加メンバーを招待し、メンバーは招待を自動承認）
 - 全キャラクターに共通する値は `COMMON_SETTINGS` に置き、`CHARACTERS.<キャラクター名>.settings` に同じキーがあれば個別値で上書きする（オブジェクトは再帰的に合成、配列は個別値で置換）
 - 合成対象は `compoundTypes` に `G.items.type` を指定します（例: アクセサリ種別に `source` を追加すると書物系も対象になります）。
 - 冒険者から補充を頼む商品は `requestItems` に `{ itemName, threshold, quantity }` の配列で設定する（複数可。閾値以下で商人へ依頼し、未補充なら `merchantTimeout` 後に再依頼）
