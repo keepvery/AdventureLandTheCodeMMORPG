@@ -90,7 +90,7 @@
         });
     };
 
-    // 合成可能な同種同レベルのアイテム3個を見つけて返す
+    // 設定された種別に合う同種同レベルの合成対象3個を返す
     Items.findCompoundableSet = function (maxLevel, allowedTypes) {
         var groups = {};
         for (var i = 0; i < character.items.length; i++) {
@@ -99,7 +99,8 @@
             var def = G.items[item.name];
             var level = item.level || 0;
             if (!def || !def.compound || level > maxLevel) continue;
-            if (allowedTypes && allowedTypes.length && allowedTypes.indexOf(def.type) < 0) continue;
+            if (Array.isArray(allowedTypes) && allowedTypes.length &&
+                allowedTypes.indexOf(def.type) < 0) continue;
             var key = item.name + "_lv" + level;
             (groups[key] = groups[key] || []).push(i);
             if (groups[key].length === 3) return { name: item.name, level: level, slots: groups[key] };
@@ -135,45 +136,91 @@
         }, settings.interval || 600);
     };
 
-    // 指定スロットのアイテムを目標レベルまで順に強化する
-    Items.upgradeOne = function (slot, targetLevel, scrollName, done) {
-        // 完了通知がない場合に使う何もしない代替関数
-        var callback = done || function () {};
+    // 強化レベルに必要なスクロールのグレードをアイテム定義から求める
+    Items.getUpgradeScrollGrade = function (itemName, level) {
+        var definition = G.items && G.items[itemName];
+        var grades = definition && definition.grades;
+        if (!Array.isArray(grades) || !grades.length) return 0;
+        if (level < grades[0]) return 0;
+        if (grades.length > 1 && level < grades[1]) return 1;
+        return Math.min(grades.length, 2);
+    };
+
+    // 指定スロットのアイテムを低グレードのスクロールから目標レベルまで強化する
+    Items.upgradeOne = function (slot, targetLevel, done) {
+        var callback = typeof done === "function" ? done : function () {};
         var original = character.items[slot];
         if (!original) {
             root.App.Common.log("指定スロットにアイテムがありません", "red");
-            callback(false, 0);
+            callback(false, 0, false);
             return;
         }
         var itemName = original.name;
+        var completed = false;
+        var upgrading = false;
         root.App.Common.log(itemName + " を Lv." + targetLevel + " まで強化します", "cyan");
-        // 一定間隔でアイテム状態を確認し、必要な操作を行う
-        var timer = setInterval(function () {
-            if (character.rip || character.q.upgrade) return;
+
+        // 強化処理を終了し、待機タイマーと呼び出し元へ一度だけ結果を返す
+        function finish(success, level, skipped) {
+            if (completed) return;
+            completed = true;
+            clearInterval(timer);
+            callback(success, level, skipped);
+        }
+
+        // 現在の強化段階に必要なグレードから所持スクロールを順に試す
+        function tryScroll(grade, level) {
+            if (grade > 2) {
+                upgrading = false;
+                root.App.Common.log(itemName + " は所持スクロールで強化できないため次へ進みます", "orange");
+                finish(false, level, true);
+                return;
+            }
+            var scrollSlot = Items.findSlot("scroll" + grade);
+            if (scrollSlot < 0) {
+                tryScroll(grade + 1, level);
+                return;
+            }
+            var result;
+            try {
+                result = upgrade(slot, scrollSlot);
+            } catch (error) {
+                tryScroll(grade + 1, level);
+                return;
+            }
+            Promise.resolve(result).then(function (response) {
+                if (response && (response.failed || response.success === false)) {
+                    tryScroll(grade + 1, level);
+                    return;
+                }
+                upgrading = false;
+            }, function () {
+                tryScroll(grade + 1, level);
+            });
+        }
+
+        // アイテム状態を確認し、現在のレベルに必要な最も低いスクロールで強化する
+        function checkUpgrade() {
+            if (character.rip || (character.q && character.q.upgrade) || upgrading || completed) return;
             var item = character.items[slot];
             if (!item || item.name !== itemName) {
-                clearInterval(timer);
                 root.App.Common.log(itemName + " は強化に失敗し破壊されました", "red");
-                callback(false, 0);
+                finish(false, 0, false);
                 return;
             }
             var level = item.level || 0;
             if (level >= targetLevel) {
-                clearInterval(timer);
                 root.App.Common.log(itemName + " が目標の Lv." + level + " に到達しました", "green");
-                callback(true, level);
+                finish(true, level, false);
                 return;
             }
-            var scrollSlot = Items.findSlot(scrollName);
-            if (scrollSlot < 0) {
-                clearInterval(timer);
-                root.App.Common.log("強化スクロール（" + scrollName + "）が不足しています", "red");
-                callback(false, level);
-                return;
-            }
+            upgrading = true;
             set_message("Upgrading Lv." + level);
-            upgrade(slot, scrollSlot);
-        }, 600);
+            tryScroll(Items.getUpgradeScrollGrade(itemName, level), level);
+        }
+
+        var timer = setInterval(checkUpgrade, 600);
+        checkUpgrade();
     };
 
     // ホワイトリストのアイテムを種類ごとに順番に強化する
@@ -193,22 +240,16 @@
             var name = names[index];
             var setting = config[name];
             var target = typeof setting === "object" ? setting.level : setting;
-            var scroll = typeof setting === "object" && setting.scroll ? setting.scroll : "scroll0";
             if (typeof target !== "number") {
                 root.App.Common.log(name + " の強化設定が不正です", "red");
                 callback(false);
                 return;
             }
-            nextItem(name, target, scroll);
+            nextItem(name, target);
         }
 
         // 対象名の未達アイテムを探して強化し、同種の次のアイテムへ進む
-        function nextItem(name, target, scroll) {
-            if (Items.findSlot(scroll) < 0) {
-                root.App.Common.log("強化スクロール（" + scroll + "）が不足しています", "red");
-                callback(false);
-                return;
-            }
+        function nextItem(name, target) {
             var slot = -1;
             for (var i = 0; i < character.items.length; i++) {
                 var item = character.items[i];
@@ -223,7 +264,12 @@
                 return;
             }
             // 強化結果に応じて次のアイテムへ進む
-            Items.upgradeOne(slot, target, scroll, function (success, finalLevel) {
+            Items.upgradeOne(slot, target, function (success, finalLevel, skipped) {
+                if (skipped) {
+                    index++;
+                    setTimeout(nextType, 250);
+                    return;
+                }
                 var current = character.items[slot];
                 var destroyed = !current || current.name !== name;
                 if (!success && !destroyed && finalLevel < target) {
@@ -231,7 +277,7 @@
                     return;
                 }
                 // 待ち時間の後に次の処理を続ける
-                setTimeout(function () { nextItem(name, target, scroll); }, 200);
+                setTimeout(function () { nextItem(name, target); }, 200);
             });
         }
 
@@ -271,7 +317,7 @@
             Items.compoundAll({
                 maxLevel: settings.maxCombineLevel,
                 scrollName: settings.compoundScroll,
-                types: settings.accessoryTypes
+                types: settings.compoundTypes || settings.accessoryTypes
             }, function (compoundOk) {
                 complete(!!upgradeOk && !!compoundOk);
             });
