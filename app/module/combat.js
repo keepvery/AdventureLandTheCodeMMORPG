@@ -9,6 +9,9 @@
         this.positionIndex = 0;
         this.positionArrivalIndex = -1;
         this.positionStayUntil = 0;
+        this.shieldSlamLastUsed = {};
+        this.shieldSlamCleanupAt = 0;
+        this.shieldSlamInFlight = false;
         this.routineId = this.settings.routineId ||
             "combat-" + ((typeof character !== "undefined" && character.name) || "unknown");
     }
@@ -49,9 +52,65 @@
             return;
         }
         if (get_targeted_monster() !== target) change_target(target);
+        if (this.settings.mode === "tank" && character.ctype === "paladin" &&
+            target.target !== character.name) {
+            var tankSettings = this.settings.tank || {};
+            var shieldSlam = this.findSkillName("Shield Slam");
+            var tankSkills = tankSettings.tankSkills || {};
+            var now = Date.now();
+            var targetKey = target.id || target.name || "unknown";
+            var slamInterval = typeof tankSettings.shieldSlamInterval === "number"
+                ? tankSettings.shieldSlamInterval : 10000;
+            if (now - this.shieldSlamCleanupAt >= 60000) {
+                for (var previousTarget in this.shieldSlamLastUsed) {
+                    if (now - this.shieldSlamLastUsed[previousTarget] >= 60000) {
+                        delete this.shieldSlamLastUsed[previousTarget];
+                    }
+                }
+                this.shieldSlamCleanupAt = now;
+            }
+            var lastSlam = this.shieldSlamLastUsed[targetKey] || 0;
+            var skills = typeof G !== "undefined" && G.skills ? G.skills : {};
+            var skillData = shieldSlam && skills[shieldSlam];
+            var skillMp = skillData && typeof skillData.mp === "number" ? skillData.mp : 0;
+            var mpReserve = typeof tankSettings.shieldSlamMpReserve === "number"
+                ? tankSettings.shieldSlamMpReserve : 1000;
+            var hasMpReserve = character.mp >= skillMp + mpReserve;
+            if (shieldSlam && tankSkills[shieldSlam] === true &&
+                !this.shieldSlamInFlight && now - lastSlam >= slamInterval &&
+                hasMpReserve && this.canUseSkill(shieldSlam)) {
+                this.shieldSlamLastUsed[targetKey] = now;
+                this.shieldSlamInFlight = true;
+                set_message("Shield Slam");
+                var self = this;
+                var result = use_skill(shieldSlam, target);
+                if (result && typeof result.then === "function") {
+                    return result.then(function (value) {
+                        self.shieldSlamInFlight = false;
+                        return value;
+                    }, function (error) {
+                        self.shieldSlamInFlight = false;
+                        throw error;
+                    });
+                }
+                this.shieldSlamInFlight = false;
+                return result;
+            }
+        }
         if (!can_attack(target)) return;
         set_message("Attacking");
         return attack(target);
+    };
+
+    // ゲームデータから表示名に一致するスキルIDを探す
+    Combat.prototype.findSkillName = function (displayName) {
+        var skills = typeof G !== "undefined" && G.skills ? G.skills : {};
+        var expectedKey = displayName.toLowerCase().replace(/\s+/g, "_");
+        if (skills[expectedKey]) return expectedKey;
+        for (var skillName in skills) {
+            if (skills[skillName] && skills[skillName].name === displayName) return skillName;
+        }
+        return null;
     };
 
     // 定位置を維持し、現在射程内にいるモンスターだけを攻撃する
@@ -162,13 +221,34 @@
         var hasParty = members.some(function (name) { return name !== character.name; });
         var target = this.findTankTarget();
 
-        // パーティ中は味方を狙う敵か自分を狙う敵がいるときだけ戦闘を優先する
+        // パーティ中は味方を狙う敵か自分を狙う敵を優先して迎撃する
         if (hasParty && target && target.target) {
             if (is_in_range(target)) return this.attackTarget(target);
             var nextX = character.x + (target.x - character.x) / 2;
             var nextY = character.y + (target.y - character.y) / 2;
             set_message("Protecting Party");
             return move(nextX, nextY);
+        }
+
+        // パーティ付近に未交戦の敵がいれば先に攻撃してヘイトを取る
+        if (hasParty && target && !target.target) {
+            var tankSettings = this.settings.tank || {};
+            var engageDistance = typeof tankSettings.engageDistance === "number"
+                ? tankSettings.engageDistance : 400;
+            var nearestPartyDistance = parent.distance(character, target);
+            for (var i = 0; i < members.length; i++) {
+                var ally = party[members[i]];
+                if (!ally || ally.rip || ally.map !== target.map) continue;
+                var allyDistance = parent.distance(ally, target);
+                if (allyDistance < nearestPartyDistance) nearestPartyDistance = allyDistance;
+            }
+            if (nearestPartyDistance <= engageDistance) {
+                if (is_in_range(target)) return this.attackTarget(target);
+                var engageX = character.x + (target.x - character.x) / 2;
+                var engageY = character.y + (target.y - character.y) / 2;
+                set_message("Engaging Nearby Target");
+                return move(engageX, engageY);
+            }
         }
 
         // パーティ外では従来どおり近くの敵を探して戦闘する
@@ -182,13 +262,10 @@
 
         if (hasParty && this.settings.followLeader !== false) {
             var leaderName = this.settings.leaderCharacter || members[0];
-            // 自分がリーダーなら追従せず、通常どおり敵を探して攻撃する
-            if (leaderName === character.name && target) {
-                if (is_in_range(target)) return this.attackTarget(target);
-                var leaderX = character.x + (target.x - character.x) / 2;
-                var leaderY = character.y + (target.y - character.y) / 2;
-                set_message("Leading Party");
-                return move(leaderX, leaderY);
+            // 自分がリーダーなら追従先がないため、敵が来るまで現在地で待機する
+            if (leaderName === character.name) {
+                set_message("Waiting for Party Targets");
+                return;
             }
             var leader = party[leaderName];
             if (!leader || leaderName === character.name || leader.rip) {

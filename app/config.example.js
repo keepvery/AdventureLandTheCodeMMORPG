@@ -23,8 +23,8 @@ window.CONFIG = {
             // パラメータ
             settings: {
                 maxCombineLevel: 2,
-                // meritem で合成するアクセサリの G.items.type
-                accessoryTypes: ["ring", "earring", "amulet", "belt", "orb"],
+                // meritem や /goitem で合成する G.items.type
+                compoundTypes: ["ring", "earring", "amulet", "belt", "orb", "source"],
                 compoundScroll: "cscroll0",
                 // 売却アイテムのホワイトリスト
                 sellItems: [
@@ -69,6 +69,8 @@ window.CONFIG = {
             modules: ["module/combat.js", "module/adventurer.js"],
             // パラメータ
             settings: {
+                // 幸運が切れる5分前から商人へ更新を依頼する
+                requestLuck: true,
                 // 商人呼び出しの対象キャラクター
                 merchantCharacter: "test1",
                 // 空き枠がこの数以下になったら商人を呼び出す

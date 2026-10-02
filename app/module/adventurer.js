@@ -2,7 +2,6 @@
 (function (root) {
     "use strict";
     root.App = root.App || {};
-    var DELIVERY_RETRY_INTERVAL = 5 * 60 * 1000;
 
     // 冒険者の戦闘・商人連携設定と実行状態を保持する
     function Adventurer(settings) {
@@ -16,6 +15,7 @@
         this.merchantRequestType = null;
         this.deliveryInProgress = false;
         this.deliveryRetryAfter = 0;
+        this.lastLuckRequestTime = 0;
     }
 
     // 設定されたアイテムを商人へ順番に送り、完了状態を更新する
@@ -59,15 +59,46 @@
             self.merchantRequestType = null;
             var reason = error && (error.reason || error.response || error.message);
             if (String(reason || error).toLowerCase().indexOf("send_no_space") >= 0) {
-                self.deliveryRetryAfter = Date.now() + DELIVERY_RETRY_INTERVAL;
+                self.deliveryRetryAfter = Date.now() + root.App.Common.DELIVERY_RETRY_INTERVAL;
                 root.App.Common.log("商人のインベントリに空きがないため受け渡しを中断しました。" +
-                    Math.ceil(DELIVERY_RETRY_INTERVAL / 60000) + "分後に再試行します", "orange");
+                    Math.ceil(root.App.Common.DELIVERY_RETRY_INTERVAL / 60000) + "分後に再試行します", "orange");
                 return false;
             }
             throw error;
         });
     };
 
+    // 幸運の残り時間が5分以下なら商人へ更新を依頼し、再送間隔を守る
+    Adventurer.prototype.requestLuckIfNeeded = function () {
+        var settings = this.settings;
+        var merchantName = settings.merchantCharacter;
+        if (!settings.requestLuck || !merchantName) return;
+        var now = Date.now();
+        var retryInterval = root.App.Common.DELIVERY_RETRY_INTERVAL;
+        if (now - this.lastLuckRequestTime < retryInterval) return;
+        var luck = character.s && character.s.mluck;
+        if (luck && typeof luck.ms === "number" && luck.ms > retryInterval) return;
+
+        this.lastLuckRequestTime = now;
+        root.App.Common.log("Merchant's Luck の更新を商人へ依頼します: " + merchantName, "yellow");
+        // 商人が受付可能になるまで同じ依頼を再送できるよう現在地を伝える
+        return send_cm(merchantName, {
+            task: "request_luck",
+            map: character.map,
+            x: character.x,
+            y: character.y
+        }).then(function (result) {
+            var receivers = result && Array.isArray(result.receivers) ? result.receivers : [];
+            if (receivers.indexOf(merchantName) < 0) {
+                root.App.Common.log("商人への幸運更新依頼が届きませんでした: " + merchantName, "orange");
+                return;
+            }
+            root.App.Common.log("商人へ幸運更新を依頼しました: " + merchantName, "cyan");
+        }, function (error) {
+            root.App.Common.log("幸運更新依頼の送信に失敗しました: " +
+                root.App.Common.formatError(error), "orange");
+        });
+    };
     // 空き枠を監視して商人を呼び、近くに来たら対象アイテムを渡す
     Adventurer.prototype.monitorMerchant = function () {
         var self = this;
@@ -184,6 +215,10 @@
                     name: "商人連携",
                     // 商人への要請とアイテム受け渡しを確認する
                     run: function () { return self.monitorMerchant(); }
+                }, {
+                    name: "幸運更新依頼",
+                    // 幸運の残り時間に応じて商人へ更新を依頼する
+                    run: function () { return self.requestLuckIfNeeded(); }
                 }]
             });
         }

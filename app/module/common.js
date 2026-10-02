@@ -30,7 +30,11 @@ function mergeAppSettings(base, override) {
     return merged;
 }
 
+var APP_DELIVERY_RETRY_INTERVAL = 5 * 60 * 1000;
+
 App.Common = {
+    // 商人が作業中の依頼を再送する共通間隔（ミリ秒）
+    DELIVERY_RETRY_INTERVAL: APP_DELIVERY_RETRY_INTERVAL,
     // エラー値からゲームログに表示できる文字列を取り出す
     formatError: function (error) {
         if (error === null || error === undefined) return "詳細なし";
@@ -337,22 +341,23 @@ App.Common = {
             return true;
         }
         if (normalizedCommand === "meritem") {
-            if (typeof settings.maxCombineLevel !== "number" || !settings.compoundScroll || !Array.isArray(settings.accessoryTypes)) {
-                App.Common.log("maxCombineLevel、compoundScroll、accessoryTypes を設定してください", "red");
+            if (typeof settings.maxCombineLevel !== "number" || !settings.compoundScroll ||
+                (!Array.isArray(settings.compoundTypes) && !Array.isArray(settings.accessoryTypes))) {
+                App.Common.log("maxCombineLevel、compoundScroll、compoundTypes を設定してください", "red");
                 return true;
             }
             if (!App.Items || typeof App.Items.compoundAll !== "function") {
                 App.Common.log("アイテムモジュールが読み込まれていません", "red");
                 return true;
             }
-            // 設定されたアクセサリ種別だけを対象に合成を開始する
+            // 設定されたアイテム種別を対象に合成を開始する
             App.Items.compoundAll({
                 maxLevel: settings.maxCombineLevel,
                 scrollName: settings.compoundScroll,
-                types: settings.accessoryTypes
+                types: settings.compoundTypes || settings.accessoryTypes,
             // 合成完了または中断の結果をゲームログへ通知する
             }, function (ok) {
-                App.Common.log(ok ? "アクセサリ合成が完了しました" : "アクセサリ合成を中断しました",
+                App.Common.log(ok ? "アイテム合成が完了しました" : "アイテム合成を中断しました",
                     ok ? "green" : "orange");
             });
             return true;

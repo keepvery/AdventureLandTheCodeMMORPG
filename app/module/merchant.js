@@ -7,6 +7,8 @@
     function Merchant(options) {
         this.options = options || {};
         this.busy = false;
+        this.referenceLuckAt = 0;
+        this.referenceLuckInitialized = false;
     }
 
     // 共通アイテム機能に設定済みアイテムの売却を依頼する
@@ -116,6 +118,98 @@
         }, 600);
     };
 
+    // Merchant's Luck の習得レベルと現在の使用可否を確認する
+    Merchant.prototype.canUseLuck = function () {
+        var skill = typeof G !== "undefined" && G.skills && G.skills.mluck;
+        if (character.ctype !== "merchant" || !skill) return false;
+        if (Array.isArray(skill.class) && skill.class.indexOf(character.ctype) < 0) return false;
+        if (typeof skill.level === "number" && character.level < skill.level) return false;
+        return can_use("mluck");
+    };
+
+    // 依頼者の場所へ移動して幸運を付与し、共通の帰還処理を行う
+    Merchant.prototype.deliverLuckRequest = function (name, data) {
+        var self = this;
+        var home = this.options.homePosition;
+        if (!data || typeof data.map !== "string" || typeof data.x !== "number" ||
+            typeof data.y !== "number" || !home || typeof home.map !== "string" ||
+            typeof home.x !== "number" || typeof home.y !== "number") {
+            root.App.Common.log("幸運更新依頼またはホームポジションの設定が不正です", "red");
+            return;
+        }
+        if (this.busy) {
+            root.App.Common.log("作業中のため幸運更新依頼を保留しました。依頼側の再送を待ちます", "gray");
+            return;
+        }
+        if (!this.canUseLuck()) {
+            root.App.Common.log("Merchant's Luck が未習得、または現在使用できません", "orange");
+            return;
+        }
+
+        this.busy = true;
+        var destination = { map: data.map, x: data.x, y: data.y };
+
+        // ゲームのコールバック式・Promise式どちらの移動完了も待つ
+        function moveTo(position) {
+            return new Promise(function (resolve, reject) {
+                var settled = false;
+                // 移動結果を一度だけ確定する
+                function finish(error) {
+                    if (settled) return;
+                    settled = true;
+                    if (error) reject(error);
+                    else resolve();
+                }
+                try {
+                    var movement = smart_move(position, function () { finish(); });
+                    if (movement && typeof movement.then === "function") {
+                        movement.then(function () { finish(); }, finish);
+                    }
+                } catch (error) {
+                    finish(error);
+                }
+            });
+        }
+
+        // ホームで共通アイテム処理を行い商人を受付状態に戻す
+        function returnHome() {
+            return moveTo(home).then(function () {
+                return new Promise(function (resolve) {
+                    self.processAtHome(function () {
+                        self.busy = false;
+                        resolve();
+                    });
+                });
+            }).then(null, function (error) {
+                root.App.Common.log("幸運付与後にホームへ戻れませんでした: " +
+                    root.App.Common.formatError(error), "red");
+                self.busy = false;
+            });
+        }
+
+        root.App.Common.log(name + " から幸運更新依頼を受信しました", "cyan");
+        Promise.resolve(this.closeStand())
+            .then(function () { return moveTo(destination); })
+            .then(function () {
+                var target = get_player(name);
+                var skill = G.skills.mluck;
+                var range = Math.max(0, (skill.range || 320) - 20);
+                if (!target || target.rip || target.map !== character.map ||
+                    parent.distance(character, target) > range) {
+                    throw new Error(name + " が付与可能な範囲にいません");
+                }
+                if (!self.canUseLuck()) throw new Error("Merchant's Luck を現在使用できません");
+                return Promise.resolve(use_skill("mluck", name)).then(function (result) {
+                    if (result && result.failed) throw result;
+                    root.App.Common.log(name + " に Merchant's Luck を付与しました", "green");
+                });
+            })
+            .then(returnHome, function (error) {
+                root.App.Common.log("幸運配布でエラーが発生しました: " +
+                    root.App.Common.formatError(error), "red");
+                return returnHome();
+            });
+    };
     // ホーム帰還後に露店準備、売却、強化、合成を共通の順序で実行する
     Merchant.prototype.processAtHome = function (done) {
         var self = this;
@@ -257,6 +351,10 @@
         var allowedSenders = root.App.Common.getAllowedSenders();
         if (data && data.task === "deliver_items" && allowedSenders.indexOf(name) < 0) {
             root.App.Common.log("許可されていないキャラクターからの補充依頼を無視しました: " + name, "orange");
+            return;
+        }
+        if (allowedSenders.indexOf(name) >= 0 && data && data.task === "request_luck") {
+            this.deliverLuckRequest(name, data);
             return;
         }
         if (allowedSenders.indexOf(name) >= 0 && data && data.task === "deliver_items") {

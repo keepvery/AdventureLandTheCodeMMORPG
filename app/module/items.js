@@ -90,7 +90,7 @@
         });
     };
 
-    // 合成可能な同種同レベルのアイテム3個を見つけて返す
+    // 設定された種別に合う同種同レベルの合成対象3個を返す
     Items.findCompoundableSet = function (maxLevel, allowedTypes) {
         var groups = {};
         for (var i = 0; i < character.items.length; i++) {
@@ -99,7 +99,8 @@
             var def = G.items[item.name];
             var level = item.level || 0;
             if (!def || !def.compound || level > maxLevel) continue;
-            if (allowedTypes && allowedTypes.length && allowedTypes.indexOf(def.type) < 0) continue;
+            if (Array.isArray(allowedTypes) && allowedTypes.length &&
+                allowedTypes.indexOf(def.type) < 0) continue;
             var key = item.name + "_lv" + level;
             (groups[key] = groups[key] || []).push(i);
             if (groups[key].length === 3) return { name: item.name, level: level, slots: groups[key] };
@@ -316,7 +317,7 @@
             Items.compoundAll({
                 maxLevel: settings.maxCombineLevel,
                 scrollName: settings.compoundScroll,
-                types: settings.accessoryTypes
+                types: settings.compoundTypes || settings.accessoryTypes
             }, function (compoundOk) {
                 complete(!!upgradeOk && !!compoundOk);
             });
