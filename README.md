@@ -93,8 +93,12 @@ eval(loadSnippet);
 - `open` / `close`: 商人キャラクターの露店を操作
 - 露店商品は `standListings` の `itemName`、`slot`、`price`、`quantity` で個別に指定できます。`quantity` は省略時1個で、指定数が所持数を超える出品はスキップします
 - 商人の補充商品は `restockItems` に複数設定できます。所持数が `threshold` 以下になると `quantity` 個を購入し、必要な場合は商品ごとの `position` へ移動してから元の位置へ戻ります。確認はモジュール内で1分ごとに行います
+- Pontyからの購入は商人の `pontyBuyItems` に `{ itemName, maxQuantity }` を設定します。`pontyCheckInterval` で指定した間隔（ミリ秒、初期値は `1 * 60 * 1000` で1分）で販売一覧を確認し、現在の所持数を含めて `maxQuantity` を超えない品だけ購入します。間隔が未設定、または0以下などの無効な値の場合は1分を使用します。`pontyMinGold` は購入後も残す最低goldです。商人が作業中、別マップ、またはPontyから500を超える距離にいる場合はその回をスキップします。Ponty購入処理による移動は行いません
 - `/xyn` の交換対象は全キャラクター共通の `COMMON_SETTINGS.exchangeItems` にアイテム名を登録します。登録した種類だけを交換し、同じ種類を所持している間は順に処理します
 - 冒険者の自動戦闘モードは `combat.mode` で選択
+- `COMMON_SETTINGS.combat.rareMonster` はレアモンスターのPT連携設定です。初期設定では実際のPTリーダー（`character.party`）が `cave` で5秒ごとに視界内の `goldenbat` を探します。発見時は通常の経験値・攻撃力フィルターより優先して接近・攻撃し、攻撃成功またはPTへのヘイトを確認したら、登録済みで受信を許可したPTメンバーへ集合通知を送ります。メンバーは通常の戦闘モードにかかわらず集合して同じ敵を攻撃します。通知は最短10秒間隔で、対象が見えず通知も途絶えて60秒経過した場合、対象の死亡を確認した場合、またはPTが変わった場合は優先戦闘を解除します。全冒険者でコードを再読み込みしてください
+- `rareMonster.patrol.enabled: true` の場合、PTに所属する冒険者は洞窟内で `rareMonster.homePosition` を拠点に射程内の敵と戦い、リーダーだけがホーム到着から10分後に `patrol.positions` を順番に巡回してホームへ戻ります。仲間はリーダーの巡回を追従しません。間隔は `patrol.interval`、各地点の確認時間は `patrol.stayMs`（どちらもミリ秒）で変更できます。巡回中にgoldenbatを見つけたら巡回を中断して戦闘に切り替え、戦闘終了後は全員が洞窟ホームへ戻ります。次の巡回は帰還完了から10分後で、再読み込み後も予定時刻を保持します。洞窟への入場は手動で行い、別マップでは既存の戦闘モードを使います
+- 洞窟ホームの初期候補は `{ map: "cave", x: 1160, y: 45 }`、巡回地点は5つのbat出現領域の中心付近です。[公式の出現処理](https://github.com/kaansoral/adventureland_mongodb/blob/main/node/server_functions.js#L2047)は5領域から1つをランダムに選ぶため、右下の近接する2領域を確認しやすい位置を選んでいます。出現後は移動するので最多出現位置の保証はありません。この付近は[公式マップ定義](https://github.com/kaansoral/adventureland_mongodb/blob/main/design/maps.js#L419)でmvampireの出現領域にも含まれます。`rareMonster.homePosition` は洞窟巡回用で、Hボタンの移動先は既存の各キャラクターの `homePosition` です
 - ホーム移動ボタンは各キャラクターの `homePosition` を参照
 
 ゲームコードは `app/` 内で編集します。Vagrant の共有フォルダーは読み取り専用なので、VM内ではなくWindows上のファイルを変更してください。Nginxはキャッシュを無効にして配信するため、通常はゲーム内 CODE を再読み込みすれば変更が反映されます。

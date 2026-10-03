@@ -15,6 +15,37 @@ window.CONFIG = {
 
     // 全キャラクターで共有する設定
     COMMON_SETTINGS: {
+        combat: {
+            // PTリーダーがレアモンスターを探し、発見時に仲間と優先して戦闘する
+            rareMonster: {
+                // レアモンスター探索と集合通知の受信を有効にする
+                enabled: true,
+                // PTリーダーが探索を行うマップ
+                map: "cave",
+                // 優先して攻撃するモンスターの種類
+                monsterType: "goldenbat",
+                // 視界内を確認する間隔（ミリ秒）
+                checkInterval: 5 * 1000,
+                // 洞窟で陣取るホーム位置（右下の2つのbat出現領域を確認しやすい位置）
+                homePosition: { map: "cave", x: 1160, y: 45 },
+                patrol: {
+                    // 洞窟ホームで待機し、PTリーダーだけが定期的に巡回する
+                    enabled: true,
+                    // ホーム到着から次の巡回開始までの間隔（ミリ秒）
+                    interval: 10 * 60 * 1000,
+                    // 洞窟の5つのbat出現領域を回る地点（最後に上記ホームへ帰還する）
+                    positions: [
+                        { map: "cave", x: -194, y: -461 },
+                        { map: "cave", x: 324, y: -1107 },
+                        { map: "cave", x: 1202, y: -782 },
+                        { map: "cave", x: 1243, y: -27 },
+                        { map: "cave", x: 1108, y: 59 }
+                    ],
+                    // 各巡回地点で周囲を確認するために滞在する時間（ミリ秒）
+                    stayMs: 5 * 1000
+                }
+            }
+        },
         // /xyn で交換するアイテム名のホワイトリスト
         exchangeItems: []
     },
@@ -60,6 +91,14 @@ window.CONFIG = {
                         position: { map: "main", x: -195, y: 91 }
                     }
                 ],
+                // Pontyから購入するアイテムのホワイトリスト（itemName と購入後の最大所持数）
+                pontyBuyItems: [
+                    // { itemName: "wbook0", maxQuantity: 2 }
+                ],
+                // Pontyの販売一覧を確認する間隔（ミリ秒）
+                pontyCheckInterval: 1 * 60 * 1000,
+                // Ponty購入後も手元に残す最低gold（この額以下では購入しない）
+                pontyMinGold: 1000000,
                 pickupDelay: 5000,
                 // ホームポジションの座標
                 homePosition: { map: "main", x: -136, y: -45 },

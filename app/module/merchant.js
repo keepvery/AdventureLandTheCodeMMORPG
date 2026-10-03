@@ -2,6 +2,7 @@
 (function (root) {
     "use strict";
     root.App = root.App || {};
+    var DEFAULT_PONTY_CHECK_INTERVAL = 60 * 1000;
 
     // 設定を保持する商人処理インスタンスを作成する
     function Merchant(options) {
@@ -39,6 +40,158 @@
             afterReturn: function () {
                 return new Promise(function (resolve) { self.openStandAndStock(resolve); });
             }
+        });
+    };
+
+    // Pontyの販売一覧を定期確認し、設定した条件を満たす品だけ購入する
+    Merchant.prototype.startPontyPurchaseRoutine = function () {
+        if (!Array.isArray(this.options.pontyBuyItems) || !this.options.pontyBuyItems.length) return;
+        var self = this;
+        var interval = this.options.pontyCheckInterval;
+        if (!Number.isFinite(interval) || interval <= 0) interval = DEFAULT_PONTY_CHECK_INTERVAL;
+        root.App.Common.startRoutine({
+            id: "merchant-ponty-" + character.name,
+            interval: interval,
+            tasks: [{
+                name: "Ponty購入",
+                // 商人が待機中のときだけPontyの販売品を確認する
+                run: function () { return self.purchaseFromPonty(); }
+            }]
+        });
+    };
+
+    // Ponty購入用のホワイトリストをアイテム名ごとの購入上限に変換する
+    Merchant.prototype.getPontyBuyLimits = function () {
+        var limits = {};
+        var entries = this.options.pontyBuyItems || [];
+        for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            if (!entry || typeof entry.itemName !== "string" || !entry.itemName ||
+                !Number.isInteger(entry.maxQuantity) || entry.maxQuantity < 1) {
+                root.App.Common.log("Ponty購入設定の itemName と maxQuantity を確認してください（設定番号: " + i + "）", "red");
+                continue;
+            }
+            limits[entry.itemName] = entry.maxQuantity;
+        }
+        return limits;
+    };
+
+    // Pontyの応答から販売アイテム配列を取り出す
+    Merchant.prototype.getPontyListings = function (response) {
+        if (Array.isArray(response)) return response;
+        if (!response || typeof response !== "object") return [];
+        if (Array.isArray(response.items)) return response.items;
+        if (Array.isArray(response.secondhands)) return response.secondhands;
+        if (Array.isArray(response.list)) return response.list;
+        return [];
+    };
+
+    // Pontyの位置をゲームデータから取得し、未取得時はmainの標準座標を使う
+    Merchant.prototype.getPontyPosition = function () {
+        var reference = typeof G !== "undefined" && G.maps && G.maps.main && G.maps.main.ref &&
+            G.maps.main.ref.secondhands;
+        if (Array.isArray(reference) && typeof reference[0] === "number" &&
+            typeof reference[1] === "number") {
+            return { map: "main", x: reference[0], y: reference[1] };
+        }
+        if (reference && typeof reference.x === "number" && typeof reference.y === "number") {
+            return { map: "main", x: reference.x, y: reference.y };
+        }
+        return { map: "main", x: 106, y: -47 };
+    };
+
+    // 現在地がPontyの販売一覧を取得できる範囲にあるか確認する
+    Merchant.prototype.isNearPonty = function (position) {
+        if (character.map !== position.map) return false;
+        var distanceX = character.x - position.x;
+        var distanceY = character.y - position.y;
+        return Math.sqrt(distanceX * distanceX + distanceY * distanceY) <= 500;
+    };
+
+    // Pontyの販売品についてスタック数を含む購入額をゲーム側と同じ倍率で計算する
+    Merchant.prototype.getPontyPurchaseCost = function (item, quantity) {
+        if (!item || typeof item.name !== "string" || typeof item_value !== "function") return null;
+        var itemData = typeof G !== "undefined" && G.items && G.items[item.name];
+        if (!itemData) return null;
+        var singleItem = {};
+        Object.keys(item).forEach(function (key) {
+            if (key !== "q") singleItem[key] = item[key];
+        });
+        var unitValue = item_value(singleItem);
+        if (!Number.isFinite(unitValue) || unitValue < 0) return null;
+        return unitValue * (itemData.cash ? 3 : 2) * quantity;
+    };
+
+    // Pontyの販売一覧から、所持数上限と最低所持金を守って対象品を順番に購入する
+    Merchant.prototype.purchaseFromPonty = function () {
+        var self = this;
+        var limits = this.getPontyBuyLimits();
+        var itemNames = Object.keys(limits);
+        var minGold = this.options.pontyMinGold;
+        var pontyPosition = this.getPontyPosition();
+        if (!itemNames.length || this.busy || character.ctype !== "merchant") return;
+        // 配送や回収の移動と競合しないよう、Pontyの範囲外では通信せず次回の確認を待つ
+        if (!this.isNearPonty(pontyPosition)) return;
+        if (!Number.isInteger(minGold) || minGold < 0) {
+            root.App.Common.log("Ponty購入設定の pontyMinGold を0以上の整数で設定してください", "red");
+            return;
+        }
+        if (character.gold <= minGold) return;
+        if (typeof get_secondhands !== "function" || typeof buy_secondhand !== "function" ||
+            typeof item_value !== "function") {
+            root.App.Common.log("Ponty購入に必要なゲームAPIを利用できません", "red");
+            return;
+        }
+
+        this.busy = true;
+
+        // 販売一覧を取得し、購入後の所持数とgoldを仮計算しながら購入する
+        function buyListings() {
+            return Promise.resolve(get_secondhands()).then(function (response) {
+                if (response && (response.failed || response.success === false)) throw response;
+                var listings = self.getPontyListings(response);
+                var held = {};
+                var remainingGold = character.gold;
+                for (var i = 0; i < itemNames.length; i++) {
+                    held[itemNames[i]] = root.App.Common.getItemQuantity(itemNames[i]);
+                }
+
+                // 販売品を一件ずつ処理し、同じ実行内でも購入上限と所持金を超えないようにする
+                function purchaseNext(index) {
+                    if (index >= listings.length || !self.isNearPonty(pontyPosition)) return Promise.resolve();
+                    var listing = listings[index] || {};
+                    var item = listing.item || listing;
+                    var itemName = item.name || listing.name;
+                    var quantity = item.q || listing.q || listing.quantity || 1;
+                    var cost = self.getPontyPurchaseCost(item, quantity);
+                    if (!limits[itemName] || listing.rid === undefined || listing.rid === null ||
+                        !Number.isFinite(cost) || !Number.isInteger(quantity) || quantity < 1 ||
+                        held[itemName] + quantity > limits[itemName] ||
+                        remainingGold - cost < minGold) {
+                        return purchaseNext(index + 1);
+                    }
+                    return Promise.resolve(buy_secondhand(listing.rid)).then(function (result) {
+                        if (result && (result.failed || result.success === false)) throw result;
+                        held[itemName] += quantity;
+                        remainingGold -= result && typeof result.cost === "number" ? result.cost : cost;
+                        root.App.Common.log("Pontyから " + itemName + " を購入しました", "green");
+                    }, function (error) {
+                        root.App.Common.log("Pontyから " + itemName + " を購入できませんでした: " +
+                            root.App.Common.formatError(error), "orange");
+                    }).then(function () {
+                        return purchaseNext(index + 1);
+                    });
+                }
+                return purchaseNext(0);
+            });
+        }
+
+        return Promise.resolve().then(buyListings).then(function () {
+            self.busy = false;
+        }, function (error) {
+            self.busy = false;
+            root.App.Common.log("Ponty購入でエラーが発生しました: " +
+                root.App.Common.formatError(error), "red");
         });
     };
 

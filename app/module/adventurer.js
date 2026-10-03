@@ -196,6 +196,11 @@
         }
     };
 
+    // キャラクターメッセージの戦闘連携を戦闘モジュールへ渡す
+    Adventurer.prototype.onCM = function (name, data) {
+        if (this.combat) this.combat.onCM(name, data);
+    };
+
     // 回復・回収・戦闘・商人連携の共通ループを開始する
     Adventurer.prototype.start = function () {
         var settings = this.settings;
