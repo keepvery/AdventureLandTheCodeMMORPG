@@ -363,15 +363,115 @@
                 return returnHome();
             });
     };
-    // ホーム帰還後に露店準備、売却、強化、合成を共通の順序で実行する
+    // 整理後も持ち物が満杯ならLidiaに重ねられる所持品を預け、ホームで露店を再開する
+    Merchant.prototype.storeMaterialsIfFull = function () {
+        if (character.ctype !== "merchant" || character.esize !== 0) return Promise.resolve(true);
+        var self = this;
+        var home = this.options.homePosition;
+        var pack = "items3";
+        var npcs = G.maps && G.maps.bank && G.maps.bank.npcs || [];
+        var destination = null;
+        for (var i = 0; i < npcs.length; i++) {
+            if (npcs[i].id === pack && Array.isArray(npcs[i].position)) {
+                destination = { map: "bank", x: npcs[i].position[0], y: npcs[i].position[1] };
+                break;
+            }
+        }
+        if (!home || typeof home.map !== "string" || !Number.isFinite(home.x) ||
+            !Number.isFinite(home.y) || !destination) {
+            root.App.Common.log("銀行への移動先またはhomePositionを確認してください", "red");
+            return Promise.resolve(false);
+        }
+        var ok = true;
+
+        // 指定地点への移動完了と到着位置を確認し、失敗時は後続操作を行わない
+        function moveTo(position) {
+            return Promise.resolve().then(function () {
+                if (character.rip) throw new Error("死亡中のため銀行への往復を中断しました");
+                return smart_move(position);
+            // 移動の成功応答だけでなく、実際に目的地へ着いていることも確認する
+            }).then(function (result) {
+                if (result && (result.failed || result.success === false)) throw result;
+                if (character.map !== position.map || parent.distance(character, position) > 80) {
+                    throw new Error(position.map + " の目的地へ到着できませんでした");
+                }
+            });
+        }
+
+        // 銀行入場後のデータ反映を最大10秒待ち、未解放の欄は自動購入しない
+        function waitForBank() {
+            var deadline = Date.now() + 10000;
+            // Lidiaの欄を読み取れるまで短い間隔で確認する
+            return new Promise(function (resolve, reject) {
+                // データ取得後は待機を終え、取得できないままの永久待機を防ぐ
+                function check() {
+                    if (character.rip || character.map !== "bank") {
+                        reject(new Error("銀行から離れたため預け入れを中断しました"));
+                    } else if (character.bank && Array.isArray(character.bank[pack])) {
+                        resolve();
+                    } else if (Date.now() >= deadline) {
+                        reject(new Error("Lidiaの預かり欄（items3）が未解放、または取得できません"));
+                    } else {
+                        setTimeout(check, 250);
+                    }
+                }
+                check();
+            });
+        }
+
+        root.App.Common.log("持ち物が満杯のため、銀行のLidiaへ素材を預けに行きます", "cyan");
+        // 露店を閉じてからLidiaへ移動し、専用APIで預け入れを行う
+        return Promise.resolve().then(function () { return self.closeStand(); })
+            // Lidiaの現在の座標へ移動する
+            .then(function () { return moveTo(destination); })
+            .then(waitForBank)
+            // Lidiaの欄に重ねられる所持品だけを預ける
+            .then(function () { return root.App.Items.storeMatchingBankStacks(pack); })
+            // 預け入れ処理の最終結果を記録する
+            .then(function (result) { ok = result; },
+            // 銀行処理に失敗した場合は理由を表示して帰還へ進む
+            function (error) {
+                ok = false;
+                root.App.Common.log("Lidiaへの預け入れを中断しました: " +
+                    root.App.Common.formatError(error), "orange");
+            })
+            // 預けられる品がない場合や預け入れ失敗時もホームへ帰還する
+            .then(function () { return moveTo(home); })
+            // 帰還できた場合だけ露店を開き、設定商品を再出品する
+            .then(function () {
+                // 出品処理の完了通知をPromiseへ変換して待つ
+                return new Promise(function (resolve) { self.openStandAndStock(resolve); });
+            })
+            // 露店準備の失敗も含めた結果を呼び出し元へ返す
+            .then(function (standOk) { return ok && standOk !== false; });
+    };
+
+    // ホーム帰還後に露店準備、売却、強化、合成、必要時の銀行往復を実行する
     Merchant.prototype.processAtHome = function (done) {
         var self = this;
+        var wasBusy = this.busy;
+        this.busy = true;
+        // 全処理の完了後に作業中状態を戻し、呼び出し元へ一度だけ通知する
+        function finish(ok) {
+            self.busy = wasBusy;
+            if (done) done(ok);
+        }
         // 露店の初期化後に共通アイテム処理を開始する
         this.openStandAndStock(function () {
+            // 売却・強化・合成の完了後に銀行への預け入れを確認する
             root.App.Items.runConfiguredOperations(self.options, function () {
-                set_message("Open Stand (Idle)");
-                root.App.Common.log("ホームでのアイテム整理が完了し、露店で待機します", "green");
-                if (done) done();
+                // 整理完了後も満杯であれば銀行往復を待ってから受付状態へ戻す
+                self.storeMaterialsIfFull().then(function (ok) {
+                    set_message("Open Stand (Idle)");
+                    root.App.Common.log(ok ? "ホームでのアイテム整理が完了し、露店で待機します" :
+                        "ホームでのアイテム整理が一部中断しました", ok ? "green" : "orange");
+                    finish(ok);
+                // 帰還に失敗した場合もbusyを解放し、次回の依頼を受け付けられるようにする
+                }, function (error) {
+                    root.App.Common.log("銀行からホームへ戻れませんでした: " +
+                        root.App.Common.formatError(error), "red");
+                    finish(false);
+                });
             });
         });
     };
@@ -560,7 +660,9 @@
     root.App.Merchant = {
         // 商人処理インスタンスを生成する
         create: function (options) {
-            return new Merchant(options);
+            var merchant = new Merchant(options);
+            root.App.Merchant.current = merchant;
+            return merchant;
         }
     };
 })(window);

@@ -4,6 +4,8 @@ window.App = window.App || {};
 window.__APP_ROUTINE_TIMERS = window.__APP_ROUTINE_TIMERS || {};
 // 補充処理の待機状態をモジュール再読込後も保持する
 window.__APP_RESTOCK_STATES = window.__APP_RESTOCK_STATES || {};
+// 再読み込み後も回復処理の応答待ちと使用待ち時間を保持する
+window.__APP_RECOVERY_STATE = window.__APP_RECOVERY_STATE || { pending: false, nextUseAt: 0 };
 var APP_RESTOCK_CHECK_INTERVAL = 60 * 1000;
 var APP_AUTO_PT_CHECK_INTERVAL = 5 * 60 * 1000;
 var APP_RESTOCK_FAILURE_COOLDOWN = 5 * 60 * 1000;
@@ -280,15 +282,77 @@ App.Common = {
         }
     },
 
+    // 減少量が最大値の70%以下なら高級品を優先し、なければ通常品の枠を返す
+    getRecoveryPotionSlot: function (resource) {
+        var current = character[resource];
+        var maximum = character["max_" + resource];
+        if (!(maximum > 0) || current >= maximum) return -1;
+        var prefix = resource === "hp" ? "hpot" : "mpot";
+        if (current <= maximum * 0.7) {
+            var highSlot = App.Items.findSlot(prefix + "1");
+            if (highSlot >= 0) return highSlot;
+        }
+        return App.Items.findSlot(prefix + "0");
+    },
+
+    // 従来のHP・MP優先順位でポーションを選び、共有クールダウンを守って回復する
+    recoverHpMp: function () {
+        var state = window.__APP_RECOVERY_STATE;
+        if (character.rip || state.pending || Date.now() < state.nextUseAt) return;
+        if (character.hp >= character.max_hp && character.mp >= character.max_mp) return;
+        if (is_on_cooldown("use_hp") || is_on_cooldown("use_mp")) return;
+
+        var resource;
+        if (character.mp / character.max_mp < 0.2) resource = "mp";
+        else if (character.hp / character.max_hp < 0.7) resource = "hp";
+        else if (character.mp / character.max_mp < 0.8) resource = "mp";
+        else if (character.hp < character.max_hp) resource = "hp";
+        else if (character.mp < character.max_mp) resource = "mp";
+        if (!resource) return;
+
+        var slot = App.Common.getRecoveryPotionSlot(resource);
+        var potionCooldown = G.skills && G.skills.use_hp && G.skills.use_hp.cooldown || 2000;
+        // 指定したポーションがないときは、従来と同じ消費アイテム不要の回復を使う
+        var waitMs = slot >= 0 ? potionCooldown : potionCooldown * 2;
+        var safetyMs = Math.max(100, Number(character.ping) || 0);
+        state.pending = true;
+
+        // サーバーの応答待ち時間を含め、回復リクエストの重複送信を防ぐ
+        function finish() {
+            state.pending = false;
+            state.nextUseAt = Date.now() + waitMs + safetyMs;
+        }
+
+        // 使用待ちの応答は待機へ戻し、それ以外の失敗は共通ログへ渡す
+        function handleFailure(error) {
+            finish();
+            var reason = error && (error.reason || error.response) || error;
+            if (reason === "not_ready" || reason === "cooldown") {
+                var remainingMs = Number(error && error.ms);
+                if (remainingMs > 0) state.nextUseAt = Date.now() + remainingMs + safetyMs;
+                return;
+            }
+            throw error;
+        }
+
+        // スロット番号を指定して使い、回復APIの同期例外も失敗処理にまとめる
+        return Promise.resolve().then(function () {
+            return slot >= 0 ? equip(slot) : use_skill("regen_" + resource);
+        }).then(function (result) {
+            if (result && (result.failed || result.success === false)) return handleFailure(result);
+            finish();
+            return result;
+        }, handleFailure);
+    },
+
     // HP・MP回復とアイテム回収に使う共通タスク一覧を作成する
     createMaintenanceTasks: function () {
         return [
             {
                 name: "HP・MP回復",
-                // HPとMPが満タンでなければ回復処理を試みる
+                // 残量に応じて通常品または高級品を使って回復する
                 run: function () {
-                    if (character.hp >= character.max_hp && character.mp >= character.max_mp) return;
-                    return use_hp_or_mp();
+                    return App.Common.recoverHpMp();
                 }
             },
             {

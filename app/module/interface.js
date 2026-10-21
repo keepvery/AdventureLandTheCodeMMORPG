@@ -11,6 +11,7 @@
         }
         // ボタン押下時に共通のホーム移動処理を呼び出す
         add_top_button("home", "H", function () {
+            if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) root.App.MonsterHunt.stop();
             root.App.Common.moveHome();
         });
         set_button_color("home", "#4bb543");
@@ -40,17 +41,50 @@
         }
     }
 
-    // 共通インターフェースを初期化し、ホーム移動ボタンを登録する
+    // Monster Huntの開始・停止を切り替えるQボタンを登録する
+    function addQuestButton() {
+        if (typeof add_top_button !== "function") return;
+        // 押すたびに討伐クエストの自動ループを切り替える
+        add_top_button("monsterhunt", "Q", function () {
+            if (root.App.MonsterHunt) root.App.MonsterHunt.toggle();
+            else root.App.Common.log("Monster Huntモジュールが読み込まれていません", "red");
+            updateQuestButton();
+        });
+        updateQuestButton();
+    }
+
+    // 討伐クエストの実行中は青、停止中はグレーの枠を表示する
+    function updateQuestButton() {
+        if (typeof set_button_color !== "function") return;
+        set_button_color("monsterhunt", root.App.MonsterHunt && root.App.MonsterHunt.isRunning()
+            ? "#2583e9" : "gray");
+    }
+
+    // /xynコマンドと同じ交換処理を実行するyボタンを登録する
+    function addExchangeButton() {
+        if (typeof add_top_button !== "function") return;
+        // 現在キャラクターの交換設定と既存の重複実行防止処理を使う
+        add_top_button("xyn", "y", function () {
+            root.App.Common.handleCommand("xyn");
+        });
+        if (typeof set_button_color === "function") set_button_color("xyn", "gray");
+    }
+
+    // 共通インターフェースを初期化し、H・I・Q・yボタンを登録する
     function init() {
         addHomeButton();
         addItemButton();
+        addQuestButton();
+        addExchangeButton();
     }
 
     root.App.Interface = {
         // 共通インターフェースの初期化処理を公開する
         init: init,
         // 外部コマンドからもIボタンの表示状態を更新できるよう公開する
-        updateItemButton: updateItemButton
+        updateItemButton: updateItemButton,
+        // Monster Hunt側からもQボタンの表示状態を更新できるよう公開する
+        updateQuestButton: updateQuestButton
     };
 
     init();

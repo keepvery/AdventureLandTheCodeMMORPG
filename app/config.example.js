@@ -4,7 +4,7 @@ window.CONFIG = {
     BASE_URL: "http://localhost:58080",
 
     // 全キャラクターに共通で先に読み込むモジュール
-    MODULES: ["module/common.js", "module/items.js", "module/interface.js"],
+    MODULES: ["module/common.js", "module/items.js", "module/monsterhunt.js", "module/interface.js"],
 
     // アカウント共通の自動PT設定（trueにすると5分ごとに不足メンバーを招待）
     AUTO_PT: false,
@@ -15,6 +15,19 @@ window.CONFIG = {
 
     // 全キャラクターで共有する設定
     COMMON_SETTINGS: {
+        // Iボタン・/goitemの実行間隔（ミリ秒。3分 = 3 * 60 * 1000）
+        itemRoutineInterval: 3 * 60 * 1000,
+        // 整理ループの開始時と各周期に購入する商品と個数（空配列で購入なし）
+        itemRoutinePurchases: [{ itemName: "mace", quantity: 1 }],
+        // 商人へgoldを渡した後も手元に残す最低金額（キャラクター別settingsで上書き可能）
+        deliveryGoldReserve: 1000000,
+        monsterHunt: {
+            // 全戦闘モードで対象外にする種別。クエスト対象なら中断してホームへ戻る（例: ["booboo"]）
+            blacklist: [],
+            // 出現地点はG.mapsから自動取得する。必要な対象だけ地点配列で上書きする
+            // 例: goo: [{ map: "main", x: -32, y: 787 }]
+            positions: {}
+        },
         combat: {
             // PTリーダーがレアモンスターを探し、発見時に仲間と優先して戦闘する
             rareMonster: {
@@ -63,6 +76,7 @@ window.CONFIG = {
                 maxCombineLevel: 2,
                 // meritem や /goitem で合成する G.items.type
                 compoundTypes: ["ring", "earring", "amulet", "belt", "orb", "source"],
+                // 合成スクロールの開始等級（不足・不適合なら cscroll1、cscroll2 の順に試す）
                 compoundScroll: "cscroll0",
                 // 売却アイテムのホワイトリスト
                 sellItems: [
@@ -119,6 +133,8 @@ window.CONFIG = {
                 requestLuck: true,
                 // 商人呼び出しの対象キャラクター
                 merchantCharacter: "test1",
+                // 確保するgoldを個別変更する場合の例（省略時はCOMMON_SETTINGSを使用）
+                // deliveryGoldReserve: 2000000,
                 // 空き枠がこの数以下になったら商人を呼び出す
                 merchantCallThreshold: 5,
                 // 依頼後に未補充なら再依頼するまでの時間（5分）

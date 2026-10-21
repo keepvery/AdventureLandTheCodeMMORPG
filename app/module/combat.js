@@ -10,6 +10,8 @@
     // 戦闘条件と巡回位置を保持する戦闘コントローラーを作成する
     function Combat(options) {
         this.settings = options || {};
+        var huntSettings = root.App.Common.getSettings().monsterHunt || {};
+        this.monsterBlacklist = Array.isArray(huntSettings.blacklist) ? huntSettings.blacklist.slice() : [];
         this.positionIndex = 0;
         this.positionArrivalIndex = -1;
         this.positionStayUntil = 0;
@@ -27,26 +29,76 @@
             "combat-" + ((typeof character !== "undefined" && character.name) || "unknown");
     }
 
-    // 対象が生存中で設定した経験値・攻撃力条件を満たすか調べる
+    // クエストと共通の討伐ブラックリストに登録されたモンスター種別かを調べる
+    Combat.prototype.isBlacklisted = function (monsterType) {
+        return this.monsterBlacklist.indexOf(monsterType) >= 0;
+    };
+
+    // 対象がブラックリストに含まれず、生存中で経験値・攻撃力条件を満たすか調べる
     Combat.prototype.isEligible = function (target) {
         var settings = this.settings;
         if (!target || target.type !== "monster" || target.dead || !target.visible) return false;
+        if (this.isBlacklisted(target.mtype)) return false;
         if (typeof settings.minMonsterXp === "number" && target.xp < settings.minMonsterXp) return false;
         if (typeof settings.maxMonsterAttack === "number" && target.attack > settings.maxMonsterAttack) return false;
         return true;
     };
 
-    // 条件に合う現在の対象か最寄りのモンスターを取得する
-    Combat.prototype.findTarget = function (requireRange) {
+    // 定位置では射程内、接近型では射程内または直線で歩ける敵だけを対象にする
+    Combat.prototype.canEngageTarget = function (target, requireRange) {
+        if (!this.isEligible(target) || (target.map && target.map !== character.map) ||
+            !Number.isFinite(target.x) || !Number.isFinite(target.y)) return false;
+        if (is_in_range(target)) return true;
+        return !requireRange && can_move_to(target.x, target.y);
+    };
+
+    // PTを組んでいる場合に他の仲間が選択している到達可能な敵を取得する
+    Combat.prototype.findPartyTarget = function (requireRange) {
+        if (!character.party) return null;
+        var party = get_party() || {};
+        if (!party[character.name]) return null;
+        var entities = parent.entities || {};
+        var allyTargets = {};
+        var members = Object.keys(party);
+        for (var i = 0; i < members.length; i++) {
+            var name = members[i];
+            if (name === character.name) continue;
+            var ally = entities[name] || get_player(name);
+            if (!ally || ally.type !== "character" || ally.npc || ally.rip || !ally.visible ||
+                (ally.map && ally.map !== character.map) ||
+                (typeof ally.target !== "string" && typeof ally.target !== "number")) continue;
+            allyTargets[ally.target] = true;
+        }
         var current = get_targeted_monster();
-        if (this.isEligible(current) && (!requireRange || is_in_range(current))) return current;
+        var chosen = null;
+        var chosenDistance = Infinity;
+        for (var id in entities) {
+            var candidate = entities[id];
+            if (!candidate || !allyTargets[candidate.id]) continue;
+            if (!this.canEngageTarget(candidate, requireRange)) continue;
+            // 仲間も選択している現在の対象があれば維持して、不要な切り替えを抑える
+            if (candidate === current) return candidate;
+            var distance = parent.distance(character, candidate);
+            if (distance < chosenDistance) {
+                chosen = candidate;
+                chosenDistance = distance;
+            }
+        }
+        return chosen;
+    };
+
+    // PT中は仲間の対象を優先し、該当しなければ現在の対象、最寄りの敵の順に取得する
+    Combat.prototype.findTarget = function (requireRange) {
+        var partyTarget = this.findPartyTarget(requireRange);
+        if (partyTarget) return partyTarget;
+        var current = get_targeted_monster();
+        if (this.canEngageTarget(current, requireRange)) return current;
         var entities = parent.entities || {};
         var nearest = null;
         var nearestDistance = Infinity;
         for (var id in entities) {
             var candidate = entities[id];
-            if (!this.isEligible(candidate)) continue;
-            if (requireRange && !is_in_range(candidate)) continue;
+            if (!this.canEngageTarget(candidate, requireRange)) continue;
             var distance = parent.distance(character, candidate);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -58,7 +110,7 @@
 
     // 選択したモンスターを攻撃可能な場合に攻撃する
     Combat.prototype.attackTarget = function (target) {
-        if (!target) {
+        if (!target || this.isBlacklisted(target.mtype)) {
             set_message("No Monsters");
             return;
         }
@@ -339,10 +391,11 @@
         set_message("Patrolling");
     };
 
-    // レアモンスター探索の設定を取得する
+    // ブラックリスト対象を除外してレアモンスター探索の設定を取得する
     Combat.prototype.getRareMonsterSettings = function () {
         var settings = this.settings.rareMonster;
-        return settings && settings.enabled === true ? settings : null;
+        return settings && settings.enabled === true && !this.isBlacklisted(settings.monsterType)
+            ? settings : null;
     };
 
     // 実際のPTに所属している場合だけゲーム側のリーダー名を返す
@@ -354,6 +407,7 @@
 
     // PTリーダーが対象マップの視界内から未交戦またはPTと交戦中のレアモンスターを探す
     Combat.prototype.searchRareMonster = function () {
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) return;
         var settings = this.getRareMonsterSettings();
         if (!settings || this.settings.enabled === false || character.rip ||
             character.map !== settings.map || this.getPartyLeader() !== character.name ||
@@ -421,6 +475,7 @@
 
     // 同じサーバーの実際のPTリーダーから届いたレアモンスター通知だけを受け取る
     Combat.prototype.onCM = function (name, data) {
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) return;
         var settings = this.getRareMonsterSettings();
         if (!settings || this.settings.enabled === false || character.rip || !data ||
             name === character.name || name !== this.getPartyLeader() ||
@@ -639,7 +694,11 @@
 
     // 有効な戦闘戦略を選び、レアモンスターとの戦闘中は通常の位置戦略より優先する
     Combat.prototype.tick = function () {
-        if (this.settings.enabled === false || character.rip) return;
+        if (character.rip) return;
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) {
+            return root.App.MonsterHunt.runCombat(this);
+        }
+        if (this.settings.enabled === false) return;
         if (this.rareEncounter) {
             var rareAction = this.runRareEncounter();
             if (this.rareEncounter || rareAction) return rareAction;
@@ -660,10 +719,10 @@
     // 設定された頻度で戦闘判断を実行する
     Combat.prototype.start = function () {
         var self = this;
-        if (this.settings.enabled === false) return;
+        if (this.settings.enabled === false && !root.App.MonsterHunt) return;
         root.App.Common.stopRoutine(this.routineId + "-rare-monster");
         var rareSettings = this.getRareMonsterSettings();
-        if (rareSettings) {
+        if (rareSettings && this.settings.enabled !== false) {
             var checkInterval = rareSettings.checkInterval;
             root.App.Common.startRoutine({
                 id: this.routineId + "-rare-monster",

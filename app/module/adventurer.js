@@ -18,8 +18,27 @@
         this.lastLuckRequestTime = 0;
     }
 
-    // 設定されたアイテムを商人へ順番に送り、完了状態を更新する
+    // 手元に確保する最低goldを差し引き、超過分だけを設定された商人へ送る
+    Adventurer.prototype.deliverGold = function () {
+        var reserve = this.settings.deliveryGoldReserve;
+        var merchantName = this.settings.merchantCharacter;
+        if (character.ctype === "merchant" || !merchantName || merchantName === character.name) return;
+        // 未設定・負数・小数などの不正設定では自動送金を行わない
+        if (!Number.isSafeInteger(reserve) || reserve < 0 || !Number.isFinite(character.gold)) return;
+        var amount = Math.floor(character.gold - reserve);
+        if (amount <= 0) return;
+
+        // goldの送信結果を待ち、失敗はアイテム受け渡しと共通のエラー処理へ渡す
+        return send_gold(merchantName, amount).then(function (result) {
+            if (result && (result.failed || result.success === false)) throw result;
+            root.App.Common.log(amount + " gold を商人に渡しました", "green");
+            return result;
+        });
+    };
+
+    // 超過goldと対象アイテムを商人へ順番に送り、完了状態を更新する
     Adventurer.prototype.deliverItems = function () {
+        if (this.deliveryInProgress) return;
         var self = this;
         var blacklist = this.settings.deliveryBlacklist || [];
         var blacklistedSlots = this.settings.deliveryBlacklistSlots || [];
@@ -34,9 +53,6 @@
         // 送信結果を待ちながら次の対象アイテムを順番に渡す
         function sendNext(index) {
             if (index >= slots.length) {
-                self.deliveryInProgress = false;
-                self.callingMerchant = false;
-                self.merchantRequestType = null;
                 return true;
             }
             var slot = slots[index];
@@ -52,8 +68,19 @@
             });
         }
 
-        // 送信失敗後に再試行できるよう連携状態を解除する
-        return Promise.resolve(sendNext(0)).then(null, function (error) {
+        // インベントリの空きに依存しないgoldを先に送り、応答後にアイテム送信へ進む
+        return Promise.resolve().then(function () {
+            return self.deliverGold();
+        }).then(function () {
+            return sendNext(0);
+        }).then(function (result) {
+            // 全送信の完了後に次の受け渡しを受け付けられる状態へ戻す
+            self.deliveryInProgress = false;
+            self.callingMerchant = false;
+            self.merchantRequestType = null;
+            return result;
+        }, function (error) {
+            // 送信失敗後に再試行できるよう連携状態を解除する
             self.deliveryInProgress = false;
             self.callingMerchant = false;
             self.merchantRequestType = null;
@@ -99,7 +126,7 @@
                 root.App.Common.formatError(error), "orange");
         });
     };
-    // 空き枠を監視して商人を呼び、近くに来たら対象アイテムを渡す
+    // 空き枠を監視して商人を呼び、近くに来たら超過goldと対象アイテムを渡す
     Adventurer.prototype.monitorMerchant = function () {
         var self = this;
         var settings = this.settings;
@@ -211,14 +238,17 @@
             // 基本タスク（回復、アイテム回収）
             tasks: root.App.Common.createMaintenanceTasks()
         });
-        if (this.combat) this.combat.start();
+        if (this.combat) {
+            if (root.App.MonsterHunt) root.App.MonsterHunt.attach(this.combat, settings.monsterHunt, this);
+            this.combat.start();
+        }
         if (settings.merchantCharacter) {
             root.App.Common.startRoutine({
                 id: this.routinePrefix + "-merchant",
                 interval: settings.merchantCheckInterval || 1000,
                 tasks: [{
                     name: "商人連携",
-                    // 商人への要請とアイテム受け渡しを確認する
+                    // 商人への要請とgold・アイテムの受け渡しを確認する
                     run: function () { return self.monitorMerchant(); }
                 }, {
                     name: "幸運更新依頼",
@@ -231,6 +261,7 @@
 
     // 冒険者が開始した各共通ループを停止する
     Adventurer.prototype.stop = function () {
+        if (root.App.MonsterHunt) root.App.MonsterHunt.detach();
         root.App.Common.stopRoutine(this.routinePrefix + "-maintenance");
         if (this.combat) this.combat.stop();
         root.App.Common.stopRoutine(this.routinePrefix + "-merchant");
