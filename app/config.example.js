@@ -4,7 +4,7 @@ window.CONFIG = {
     BASE_URL: "http://localhost:58080",
 
     // 全キャラクターに共通で先に読み込むモジュール
-    MODULES: ["module/common.js", "module/items.js", "module/interface.js"],
+    MODULES: ["module/common.js", "module/items.js", "module/monsterhunt.js", "module/interface.js"],
 
     // アカウント共通の自動PT設定（trueにすると5分ごとに不足メンバーを招待）
     AUTO_PT: false,
@@ -15,6 +15,50 @@ window.CONFIG = {
 
     // 全キャラクターで共有する設定
     COMMON_SETTINGS: {
+        // Iボタン・/goitemの実行間隔（ミリ秒。3分 = 3 * 60 * 1000）
+        itemRoutineInterval: 3 * 60 * 1000,
+        // 整理ループの開始時と各周期に購入する商品と個数（空配列で購入なし）
+        itemRoutinePurchases: [{ itemName: "mace", quantity: 1 }],
+        // 商人へgoldを渡した後も手元に残す最低金額（キャラクター別settingsで上書き可能）
+        deliveryGoldReserve: 1000000,
+        monsterHunt: {
+            // 全戦闘モードで対象外にする種別。クエスト対象なら中断してホームへ戻る（例: ["booboo"]）
+            blacklist: [],
+            // 出現地点はG.mapsから自動取得する。必要な対象だけ地点配列で上書きする
+            // 例: goo: [{ map: "main", x: -32, y: 787 }]
+            positions: {}
+        },
+        combat: {
+            // PTリーダーがレアモンスターを探し、発見時に仲間と優先して戦闘する
+            rareMonster: {
+                // レアモンスター探索と集合通知の受信を有効にする
+                enabled: true,
+                // PTリーダーが探索を行うマップ
+                map: "cave",
+                // 優先して攻撃するモンスターの種類
+                monsterType: "goldenbat",
+                // 視界内を確認する間隔（ミリ秒）
+                checkInterval: 5 * 1000,
+                // 洞窟で陣取るホーム位置（右下の2つのbat出現領域を確認しやすい位置）
+                homePosition: { map: "cave", x: 1160, y: 45 },
+                patrol: {
+                    // 洞窟ホームで待機し、PTリーダーだけが定期的に巡回する
+                    enabled: true,
+                    // ホーム到着から次の巡回開始までの間隔（ミリ秒）
+                    interval: 10 * 60 * 1000,
+                    // 洞窟の5つのbat出現領域を回る地点（最後に上記ホームへ帰還する）
+                    positions: [
+                        { map: "cave", x: -194, y: -461 },
+                        { map: "cave", x: 324, y: -1107 },
+                        { map: "cave", x: 1202, y: -782 },
+                        { map: "cave", x: 1243, y: -27 },
+                        { map: "cave", x: 1108, y: 59 }
+                    ],
+                    // 各巡回地点で周囲を確認するために滞在する時間（ミリ秒）
+                    stayMs: 5 * 1000
+                }
+            }
+        },
         // /xyn で交換するアイテム名のホワイトリスト
         exchangeItems: []
     },
@@ -32,6 +76,7 @@ window.CONFIG = {
                 maxCombineLevel: 2,
                 // meritem や /goitem で合成する G.items.type
                 compoundTypes: ["ring", "earring", "amulet", "belt", "orb", "source"],
+                // 合成スクロールの開始等級（不足・不適合なら cscroll1、cscroll2 の順に試す）
                 compoundScroll: "cscroll0",
                 // 売却アイテムのホワイトリスト
                 sellItems: [
@@ -46,6 +91,12 @@ window.CONFIG = {
                     sshield: 4,
                     mushroomstaff: 5 // キノコ杖
                 },
+                // 既存スタックへの預け先を確認順に指定（例: ["items3", "items2"]、[]でスタック預け入れのみ無効）
+                bankDepositPacks: ["items3"],
+                // 未完成倉庫の配列。全倉庫と所持品をまとめて比較（例: ["items4", "items5"]）
+                accessoryUnfinishedBankPack: ["items4"],
+                // 完成倉庫の配列。指定順に空きのある欄へ預ける（例: ["items1", "items2"]）
+                accessoryFinishedBankPack: ["items1"],
                 // itemName は商品名、slot は露店側の出品枠、price は販売価格、quantity は出品個数
                 standListings: [
                     { slot: 1, itemName: "cclaw", price: 99999999, quantity: 5 },
@@ -60,6 +111,14 @@ window.CONFIG = {
                         position: { map: "main", x: -195, y: 91 }
                     }
                 ],
+                // Pontyから購入するアイテムのホワイトリスト（itemName と購入後の最大所持数）
+                pontyBuyItems: [
+                    // { itemName: "wbook0", maxQuantity: 2 }
+                ],
+                // Pontyの販売一覧を確認する間隔（ミリ秒）
+                pontyCheckInterval: 1 * 60 * 1000,
+                // Ponty購入後も手元に残す最低gold（この額以下では購入しない）
+                pontyMinGold: 1000000,
                 pickupDelay: 5000,
                 // ホームポジションの座標
                 homePosition: { map: "main", x: -136, y: -45 },
@@ -80,6 +139,8 @@ window.CONFIG = {
                 requestLuck: true,
                 // 商人呼び出しの対象キャラクター
                 merchantCharacter: "test1",
+                // 確保するgoldを個別変更する場合の例（省略時はCOMMON_SETTINGSを使用）
+                // deliveryGoldReserve: 2000000,
                 // 空き枠がこの数以下になったら商人を呼び出す
                 merchantCallThreshold: 5,
                 // 依頼後に未補充なら再依頼するまでの時間（5分）

@@ -30,6 +30,11 @@ App.Chara3 = {
 // ゲーム本体のコマンドイベントをキャラクター3の処理へ渡す
 function handle_command(command, args) { App.Chara3.handleCommand(command, args); }
 
+// ゲーム本体のメッセージ受信イベントを冒険者の戦闘連携へ渡す
+function on_cm(name, data) {
+    if (App.Chara3.adventurer) App.Chara3.adventurer.onCM(name, data);
+}
+
 if (typeof parent !== "undefined") parent.handle_command = handle_command;
 
 App.Chara3.init();

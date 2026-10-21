@@ -15,6 +15,8 @@ App.Chara1 = {
         this.merchant = App.Merchant.create(this.settings);
         // 商人モジュールの定期在庫補充を開始する
         this.merchant.startRestockRoutine();
+        // 商人モジュールのPonty販売品の定期購入を開始する
+        this.merchant.startPontyPurchaseRoutine();
         // 共通ループから回復とアイテム回収を一定間隔で呼び出す
         App.Common.startRoutine({
             id: "character1",

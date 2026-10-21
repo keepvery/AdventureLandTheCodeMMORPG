@@ -2,40 +2,103 @@
 (function (root) {
     "use strict";
     root.App = root.App || {};
+    var RARE_MONSTER_CALL_INTERVAL = 10 * 1000;
+    var RARE_MONSTER_TIMEOUT = 60 * 1000;
+    // コード再読み込み後も次の巡回予定時刻を保持する
+    root.__APP_RARE_PATROL_TIMES = root.__APP_RARE_PATROL_TIMES || {};
 
     // 戦闘条件と巡回位置を保持する戦闘コントローラーを作成する
     function Combat(options) {
         this.settings = options || {};
+        var huntSettings = root.App.Common.getSettings().monsterHunt || {};
+        this.monsterBlacklist = Array.isArray(huntSettings.blacklist) ? huntSettings.blacklist.slice() : [];
         this.positionIndex = 0;
         this.positionArrivalIndex = -1;
         this.positionStayUntil = 0;
         this.shieldSlamLastUsed = {};
         this.shieldSlamCleanupAt = 0;
         this.shieldSlamInFlight = false;
+        this.rareEncounter = null;
+        this.lastRareCallTime = 0;
+        this.rareMoveInFlight = false;
+        this.rareMoveRetryAt = 0;
+        this.rarePatrolPhase = "home";
+        this.rarePatrolIndex = 0;
+        this.rarePatrolStayUntil = 0;
         this.routineId = this.settings.routineId ||
             "combat-" + ((typeof character !== "undefined" && character.name) || "unknown");
     }
 
-    // 対象が生存中で設定した経験値・攻撃力条件を満たすか調べる
+    // クエストと共通の討伐ブラックリストに登録されたモンスター種別かを調べる
+    Combat.prototype.isBlacklisted = function (monsterType) {
+        return this.monsterBlacklist.indexOf(monsterType) >= 0;
+    };
+
+    // 対象がブラックリストに含まれず、生存中で経験値・攻撃力条件を満たすか調べる
     Combat.prototype.isEligible = function (target) {
         var settings = this.settings;
         if (!target || target.type !== "monster" || target.dead || !target.visible) return false;
+        if (this.isBlacklisted(target.mtype)) return false;
         if (typeof settings.minMonsterXp === "number" && target.xp < settings.minMonsterXp) return false;
         if (typeof settings.maxMonsterAttack === "number" && target.attack > settings.maxMonsterAttack) return false;
         return true;
     };
 
-    // 条件に合う現在の対象か最寄りのモンスターを取得する
-    Combat.prototype.findTarget = function (requireRange) {
+    // 定位置では射程内、接近型では射程内または直線で歩ける敵だけを対象にする
+    Combat.prototype.canEngageTarget = function (target, requireRange) {
+        if (!this.isEligible(target) || (target.map && target.map !== character.map) ||
+            !Number.isFinite(target.x) || !Number.isFinite(target.y)) return false;
+        if (is_in_range(target)) return true;
+        return !requireRange && can_move_to(target.x, target.y);
+    };
+
+    // PTを組んでいる場合に他の仲間が選択している到達可能な敵を取得する
+    Combat.prototype.findPartyTarget = function (requireRange) {
+        if (!character.party) return null;
+        var party = get_party() || {};
+        if (!party[character.name]) return null;
+        var entities = parent.entities || {};
+        var allyTargets = {};
+        var members = Object.keys(party);
+        for (var i = 0; i < members.length; i++) {
+            var name = members[i];
+            if (name === character.name) continue;
+            var ally = entities[name] || get_player(name);
+            if (!ally || ally.type !== "character" || ally.npc || ally.rip || !ally.visible ||
+                (ally.map && ally.map !== character.map) ||
+                (typeof ally.target !== "string" && typeof ally.target !== "number")) continue;
+            allyTargets[ally.target] = true;
+        }
         var current = get_targeted_monster();
-        if (this.isEligible(current) && (!requireRange || is_in_range(current))) return current;
+        var chosen = null;
+        var chosenDistance = Infinity;
+        for (var id in entities) {
+            var candidate = entities[id];
+            if (!candidate || !allyTargets[candidate.id]) continue;
+            if (!this.canEngageTarget(candidate, requireRange)) continue;
+            // 仲間も選択している現在の対象があれば維持して、不要な切り替えを抑える
+            if (candidate === current) return candidate;
+            var distance = parent.distance(character, candidate);
+            if (distance < chosenDistance) {
+                chosen = candidate;
+                chosenDistance = distance;
+            }
+        }
+        return chosen;
+    };
+
+    // PT中は仲間の対象を優先し、該当しなければ現在の対象、最寄りの敵の順に取得する
+    Combat.prototype.findTarget = function (requireRange) {
+        var partyTarget = this.findPartyTarget(requireRange);
+        if (partyTarget) return partyTarget;
+        var current = get_targeted_monster();
+        if (this.canEngageTarget(current, requireRange)) return current;
         var entities = parent.entities || {};
         var nearest = null;
         var nearestDistance = Infinity;
         for (var id in entities) {
             var candidate = entities[id];
-            if (!this.isEligible(candidate)) continue;
-            if (requireRange && !is_in_range(candidate)) continue;
+            if (!this.canEngageTarget(candidate, requireRange)) continue;
             var distance = parent.distance(character, candidate);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -47,7 +110,7 @@
 
     // 選択したモンスターを攻撃可能な場合に攻撃する
     Combat.prototype.attackTarget = function (target) {
-        if (!target) {
+        if (!target || this.isBlacklisted(target.mtype)) {
             set_message("No Monsters");
             return;
         }
@@ -328,9 +391,323 @@
         set_message("Patrolling");
     };
 
-    // 有効な戦闘戦略を選び、該当する行動を実行する
+    // ブラックリスト対象を除外してレアモンスター探索の設定を取得する
+    Combat.prototype.getRareMonsterSettings = function () {
+        var settings = this.settings.rareMonster;
+        return settings && settings.enabled === true && !this.isBlacklisted(settings.monsterType)
+            ? settings : null;
+    };
+
+    // 実際のPTに所属している場合だけゲーム側のリーダー名を返す
+    Combat.prototype.getPartyLeader = function () {
+        var party = get_party() || {};
+        return typeof character.party === "string" && party[character.party] && party[character.name]
+            ? character.party : null;
+    };
+
+    // PTリーダーが対象マップの視界内から未交戦またはPTと交戦中のレアモンスターを探す
+    Combat.prototype.searchRareMonster = function () {
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) return;
+        var settings = this.getRareMonsterSettings();
+        if (!settings || this.settings.enabled === false || character.rip ||
+            character.map !== settings.map || this.getPartyLeader() !== character.name ||
+            this.rareEncounter) return;
+        var party = get_party() || {};
+        var entities = parent.entities || {};
+        var nearest = null;
+        var nearestDistance = Infinity;
+        for (var id in entities) {
+            var monster = entities[id];
+            if (!monster || monster.type !== "monster" || monster.mtype !== settings.monsterType ||
+                monster.dead || !monster.visible ||
+                (monster.map && monster.map !== character.map) ||
+                (monster.target && !party[monster.target])) continue;
+            var distance = parent.distance(character, monster);
+            if (distance < nearestDistance) {
+                nearest = monster;
+                nearestDistance = distance;
+            }
+        }
+        if (!nearest || !Number.isFinite(nearest.x) || !Number.isFinite(nearest.y)) return;
+        this.rareEncounter = {
+            id: nearest.id,
+            leaderName: character.name,
+            map: character.map,
+            x: nearest.x,
+            y: nearest.y,
+            expiresAt: Date.now() + RARE_MONSTER_TIMEOUT,
+            engaged: !!nearest.target
+        };
+        this.lastRareCallTime = 0;
+        // 巡回中に見つけた場合は巡回移動を中断して接近・攻撃へ切り替える
+        if (this.rareMoveInFlight) stop("move");
+        root.App.Common.log(settings.monsterType + " を発見しました。優先して攻撃します", "yellow");
+    };
+
+    // 登録済みで受信を許可したPTメンバーにレアモンスターの集合・終了通知を送る
+    Combat.prototype.notifyRareMonster = function (finished) {
+        var encounter = this.rareEncounter;
+        var settings = this.getRareMonsterSettings();
+        if (!settings || !encounter || encounter.leaderName !== character.name) return;
+        var now = Date.now();
+        if (!finished && (!encounter.engaged || now - this.lastRareCallTime < RARE_MONSTER_CALL_INTERVAL)) return;
+        var party = get_party() || {};
+        var allowed = root.App.Common.getAllowedSenders();
+        var members = Object.keys(party).filter(function (name) { return allowed.indexOf(name) >= 0; });
+        if (!members.length) return;
+        this.lastRareCallTime = now;
+        var message = {
+            task: finished ? "rare_monster_end" : "rare_monster_found",
+            monsterId: encounter.id,
+            monsterType: settings.monsterType,
+            map: encounter.map,
+            x: encounter.x,
+            y: encounter.y,
+            serverRegion: parent.server_region,
+            serverId: parent.server_identifier
+        };
+        return Promise.resolve().then(function () { return send_cm(members, message); })
+            .then(null, function (error) {
+                root.App.Common.log("レアモンスター通知に失敗しました: " +
+                    root.App.Common.formatError(error), "orange");
+            });
+    };
+
+    // 同じサーバーの実際のPTリーダーから届いたレアモンスター通知だけを受け取る
+    Combat.prototype.onCM = function (name, data) {
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) return;
+        var settings = this.getRareMonsterSettings();
+        if (!settings || this.settings.enabled === false || character.rip || !data ||
+            name === character.name || name !== this.getPartyLeader() ||
+            root.App.Common.getAllowedSenders().indexOf(name) < 0 ||
+            data.serverRegion !== parent.server_region || data.serverId !== parent.server_identifier ||
+            data.monsterType !== settings.monsterType || data.map !== settings.map) return;
+        if (data.task === "rare_monster_end") {
+            if (this.rareEncounter && this.rareEncounter.id === data.monsterId) this.clearRareEncounter();
+            return;
+        }
+        if (data.task !== "rare_monster_found" ||
+            (typeof data.monsterId !== "string" && typeof data.monsterId !== "number") ||
+            !Number.isFinite(data.x) || !Number.isFinite(data.y)) return;
+        var isNew = !this.rareEncounter || this.rareEncounter.id !== data.monsterId;
+        this.rareEncounter = {
+            id: data.monsterId,
+            leaderName: name,
+            map: data.map,
+            x: data.x,
+            y: data.y,
+            expiresAt: Date.now() + RARE_MONSTER_TIMEOUT,
+            engaged: true
+        };
+        if (isNew && this.rareMoveInFlight) stop("move");
+        if (isNew) root.App.Common.log(name + " の " + settings.monsterType + " 戦へ集合します", "cyan");
+    };
+
+    // レアモンスターの優先戦闘を解除し、この処理が開始した移動だけを停止する
+    Combat.prototype.clearRareEncounter = function () {
+        if (this.rareEncounter) {
+            this.rarePatrolPhase = "returning";
+            this.rarePatrolIndex = 0;
+            this.rarePatrolStayUntil = 0;
+        }
+        this.rareEncounter = null;
+        if (this.rareMoveInFlight) stop("move");
+    };
+
+    // レアモンスターへの接近・巡回・帰還の移動を実行し、重複と中断エラーを抑える
+    Combat.prototype.moveToRareMonster = function (position) {
+        var self = this;
+        if (Date.now() < this.rareMoveRetryAt) return;
+        this.rareMoveInFlight = true;
+        return Promise.resolve().then(function () { return smart_move(position); })
+            .then(function (result) {
+                if (result && (result.failed || result.success === false)) {
+                    self.rareMoveInFlight = false;
+                    self.rareMoveRetryAt = Date.now() + 5000;
+                    throw result;
+                }
+                self.rareMoveInFlight = false;
+                return result;
+            }, function (error) {
+                self.rareMoveInFlight = false;
+                if (error && error.reason === "interrupted") return;
+                self.rareMoveRetryAt = Date.now() + 5000;
+                throw error;
+            });
+    };
+
+    // 通常戦闘よりレアモンスターを優先し、リーダーの攻撃成功後に仲間を呼ぶ
+    Combat.prototype.runRareEncounter = function () {
+        var self = this;
+        var encounter = this.rareEncounter;
+        var settings = this.getRareMonsterSettings();
+        if (!settings || this.getPartyLeader() !== encounter.leaderName ||
+            Date.now() >= encounter.expiresAt ||
+            (encounter.leaderName === character.name && character.map !== encounter.map)) {
+            this.notifyRareMonster(true);
+            this.clearRareEncounter();
+            return;
+        }
+        var target = (parent.entities || {})[encounter.id];
+        if (target && (target.dead || target.hp === 0)) {
+            this.notifyRareMonster(true);
+            this.clearRareEncounter();
+            return;
+        }
+        var visible = character.map === encounter.map && target && target.visible &&
+            target.type === "monster" && target.mtype === settings.monsterType;
+        if (visible) {
+            encounter.x = target.x;
+            encounter.y = target.y;
+            encounter.expiresAt = Date.now() + RARE_MONSTER_TIMEOUT;
+            if (target.target && (get_party() || {})[target.target]) encounter.engaged = true;
+            this.notifyRareMonster(false);
+        }
+        if (this.rareMoveInFlight || (typeof smart !== "undefined" && smart.moving) || is_moving(character)) return;
+        if (this.settings.mode === "tank") {
+            var defense = this.useTankDefense();
+            if (defense) return defense;
+        }
+        if (visible && is_in_range(target)) {
+            var result = this.attackTarget(target);
+            if (!result) return;
+            return Promise.resolve(result).then(function (value) {
+                if (value && (value.failed || value.success === false)) throw value;
+                if (self.rareEncounter !== encounter) return value;
+                encounter.engaged = true;
+                self.notifyRareMonster(false);
+                return value;
+            });
+        }
+        var destination = { map: encounter.map, x: encounter.x, y: encounter.y };
+        if (visible) {
+            // 近接職も射程内へ入れるよう、直線で歩ける場合は少しずつ敵に近づく
+            var nextX = character.x + (target.x - character.x) / 2;
+            var nextY = character.y + (target.y - character.y) / 2;
+            if (can_move_to(nextX, nextY)) {
+                set_message("Approaching " + settings.monsterType);
+                return move(nextX, nextY);
+            }
+        }
+        if (visible || character.map !== destination.map || parent.distance(character, destination) > 40) {
+            set_message("Moving to " + settings.monsterType);
+            return this.moveToRareMonster(destination);
+        }
+        set_message("Waiting for " + settings.monsterType);
+    };
+
+    // 有効な巡回設定と対象マップ内のホーム位置を取得する
+    Combat.prototype.getRarePatrolSettings = function () {
+        var settings = this.getRareMonsterSettings();
+        var home = settings && settings.homePosition;
+        if (!settings || !settings.patrol || settings.patrol.enabled !== true ||
+            !home || home.map !== settings.map || !Number.isFinite(home.x) || !Number.isFinite(home.y)) return null;
+        return settings;
+    };
+
+    // ホーム到着後に次の巡回時刻を設定し、巡回状態を初期化する
+    Combat.prototype.finishRarePatrol = function (settings) {
+        var interval = settings.patrol.interval;
+        if (!Number.isFinite(interval) || interval <= 0) interval = 10 * 60 * 1000;
+        root.__APP_RARE_PATROL_TIMES[this.routineId + "-" + settings.map] = Date.now() + interval;
+        this.rarePatrolPhase = "home";
+        this.rarePatrolIndex = 0;
+        this.rarePatrolStayUntil = 0;
+    };
+
+    // 洞窟のホームで待機し、リーダーだけが設定間隔で巡回してホームへ戻る
+    Combat.prototype.runRarePatrol = function (settings) {
+        if (this.rareMoveInFlight || (typeof smart !== "undefined" && smart.moving) || is_moving(character)) return;
+        var leaderName = this.getPartyLeader();
+        var home = settings.homePosition;
+        var patrol = settings.patrol;
+        var key = this.routineId + "-" + settings.map;
+        var positions = Array.isArray(patrol.positions) ? patrol.positions : [];
+        var now = Date.now();
+        if (!Number.isFinite(root.__APP_RARE_PATROL_TIMES[key])) this.finishRarePatrol(settings);
+
+        // 巡回中にリーダーが変わった場合は巡回を終了してホームへ戻る
+        if (this.rarePatrolPhase === "patrolling" && leaderName !== character.name) {
+            this.rarePatrolPhase = "returning";
+        }
+
+        if (this.rarePatrolPhase === "patrolling") {
+            if (this.rarePatrolIndex >= positions.length) {
+                this.rarePatrolPhase = "returning";
+            } else {
+                var position = positions[this.rarePatrolIndex];
+                if (!position || position.map !== settings.map ||
+                    !Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+                    root.App.Common.log("レアモンスターの巡回地点を確認してください（設定番号: " +
+                        this.rarePatrolIndex + "）", "orange");
+                    this.rarePatrolIndex++;
+                    this.rarePatrolStayUntil = 0;
+                    return;
+                }
+                if (parent.distance(character, position) > 40) {
+                    set_message("Rare Patrol " + (this.rarePatrolIndex + 1));
+                    return this.moveToRareMonster(position);
+                }
+                if (!this.rarePatrolStayUntil) {
+                    var stayMs = patrol.stayMs;
+                    this.rarePatrolStayUntil = now +
+                        (Number.isFinite(stayMs) && stayMs > 0 ? stayMs : 5000);
+                    // 各地点の到着時にも探索し、定期チェックの直前に通過した敵を見逃しにくくする
+                    this.searchRareMonster();
+                    if (this.rareEncounter) return;
+                }
+                if (now >= this.rarePatrolStayUntil) {
+                    this.rarePatrolIndex++;
+                    this.rarePatrolStayUntil = 0;
+                }
+                return this.runRareHomeCombat();
+            }
+        }
+
+        if (parent.distance(character, home) > 40) {
+            this.rarePatrolPhase = "returning";
+            set_message("Returning to Cave Home");
+            return this.moveToRareMonster(home);
+        }
+        if (this.rarePatrolPhase === "returning") {
+            this.finishRarePatrol(settings);
+            root.App.Common.log("洞窟ホームに戻りました。次の巡回まで待機します", "cyan");
+        }
+        if (leaderName === character.name && positions.length && now >= root.__APP_RARE_PATROL_TIMES[key]) {
+            this.rarePatrolPhase = "patrolling";
+            this.rarePatrolIndex = 0;
+            this.rarePatrolStayUntil = 0;
+            root.App.Common.log("レアモンスターを探す巡回を開始します", "cyan");
+            return;
+        }
+        return this.runRareHomeCombat();
+    };
+
+    // ホーム待機中と巡回地点の確認中は防御と射程内の通常攻撃だけを行う
+    Combat.prototype.runRareHomeCombat = function () {
+        if (this.settings.mode === "tank") {
+            var defense = this.useTankDefense();
+            if (defense) return defense;
+        }
+        return this.runStationary();
+    };
+
+    // 有効な戦闘戦略を選び、レアモンスターとの戦闘中は通常の位置戦略より優先する
     Combat.prototype.tick = function () {
-        if (this.settings.enabled === false || character.rip || is_moving(character)) return;
+        if (character.rip) return;
+        if (root.App.MonsterHunt && root.App.MonsterHunt.isRunning()) {
+            return root.App.MonsterHunt.runCombat(this);
+        }
+        if (this.settings.enabled === false) return;
+        if (this.rareEncounter) {
+            var rareAction = this.runRareEncounter();
+            if (this.rareEncounter || rareAction) return rareAction;
+        }
+        var patrolSettings = this.getRarePatrolSettings();
+        if (patrolSettings && character.map === patrolSettings.map && this.getPartyLeader()) {
+            return this.runRarePatrol(patrolSettings);
+        }
+        if (is_moving(character)) return;
         var mode = this.settings.mode || "stationary";
         if (mode === "stationary") return this.runStationary();
         if (mode === "approach") return this.runApproach();
@@ -342,7 +719,21 @@
     // 設定された頻度で戦闘判断を実行する
     Combat.prototype.start = function () {
         var self = this;
-        if (this.settings.enabled === false) return;
+        if (this.settings.enabled === false && !root.App.MonsterHunt) return;
+        root.App.Common.stopRoutine(this.routineId + "-rare-monster");
+        var rareSettings = this.getRareMonsterSettings();
+        if (rareSettings && this.settings.enabled !== false) {
+            var checkInterval = rareSettings.checkInterval;
+            root.App.Common.startRoutine({
+                id: this.routineId + "-rare-monster",
+                interval: Number.isFinite(checkInterval) && checkInterval > 0 ? checkInterval : 5000,
+                tasks: [{
+                    name: "レアモンスター探索",
+                    // PTリーダーが対象マップでレアモンスターを確認する
+                    run: function () { return self.searchRareMonster(); }
+                }]
+            });
+        }
         root.App.Common.startRoutine({
             id: this.routineId,
             interval: this.settings.interval || 250,
@@ -357,6 +748,8 @@
     // 戦闘用の定期実行を停止する
     Combat.prototype.stop = function () {
         root.App.Common.stopRoutine(this.routineId);
+        root.App.Common.stopRoutine(this.routineId + "-rare-monster");
+        this.clearRareEncounter();
     };
 
     // キャラクターごとの設定から戦闘コントローラーを生成する
