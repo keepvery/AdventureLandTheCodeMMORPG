@@ -70,12 +70,28 @@
         if (typeof set_button_color === "function") set_button_color("xyn", "gray");
     }
 
-    // 共通インターフェースを初期化し、H・I・Q・yボタンを登録する
+    // スタック預け入れとアクセサリ整理を単発実行するBボタンを登録する
+    function addBankButton() {
+        if (typeof add_top_button !== "function") return;
+        // 現在の商人インスタンスへ銀行整理を委譲する
+        add_top_button("bank-organize", "B", function () {
+            var merchant = root.App.Merchant && root.App.Merchant.current;
+            if (character.ctype !== "merchant" || !merchant) {
+                root.App.Common.log("銀行整理は商人キャラクターで実行してください", "orange");
+                return;
+            }
+            merchant.organizeBank();
+        });
+        if (typeof set_button_color === "function") set_button_color("bank-organize", "gray");
+    }
+
+    // 共通インターフェースを初期化し、H・I・Q・y・Bボタンを登録する
     function init() {
         addHomeButton();
         addItemButton();
         addQuestButton();
         addExchangeButton();
+        addBankButton();
     }
 
     root.App.Interface = {

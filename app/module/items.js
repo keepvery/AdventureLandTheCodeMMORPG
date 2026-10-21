@@ -352,6 +352,8 @@
 
     // 指定の銀行欄に既存スタックと重ねられる所持品を全スロット確認して順に預ける
     Items.storeMatchingBankStacks = function (pack) {
+        var npc = G.npcs && G.npcs[pack];
+        var bankLabel = (npc && npc.name || pack) + "（" + pack + "）";
         if (!character.bank || !Array.isArray(character.bank[pack])) {
             return Promise.reject(new Error("銀行の預かり欄を読み込めません: " + pack));
         }
@@ -366,7 +368,7 @@
                 throw new Error("銀行での預け入れを継続できません");
             }
             if (slot >= character.items.length) {
-                root.App.Common.log("Lidiaへの預け入れが完了しました（" + stored + "枠）", "green");
+                root.App.Common.log(bankLabel + "への預け入れが完了しました（" + stored + "枠）", "green");
                 return Promise.resolve(ok);
             }
             var item = character.items[slot];
@@ -389,7 +391,7 @@
             }).then(function (result) {
                 if (result && (result.failed || result.success === false)) throw result;
                 stored++;
-                root.App.Common.log(label + " をLidiaへ預けました", "green");
+                root.App.Common.log(label + " を" + bankLabel + "へ預けました", "green");
             // 個別の預け入れに失敗しても、他の対象の処理を続ける
             }).catch(function (error) {
                 ok = false;
@@ -400,6 +402,318 @@
         }
         // 同期エラーも呼び出し元で捕捉できるようPromiseから預け入れを開始する
         return Promise.resolve().then(function () { return storeNext(0); });
+    };
+
+    // 複数の完成・未完成倉庫をまとめて整理し、所持品へ合成用の3個組を確保する
+    Items.organizeBankAccessories = function (settings, visitPack) {
+        var unfinished = normalizePacks(settings.accessoryUnfinishedBankPack);
+        var finished = normalizePacks(settings.accessoryFinishedBankPack);
+        var unfinishedPacks = [];
+        var finishedPacks = [];
+        var snapshots = Object.create(null);
+        var maxLevel = settings.maxCombineLevel;
+        var types = settings.compoundTypes || settings.accessoryTypes ||
+            ["ring", "earring", "amulet", "belt", "orb"];
+        var ok = true;
+
+        // 旧形式の文字列も受け取り、重複しない預かり欄IDの配列へ変換する
+        function normalizePacks(value) {
+            if (value === undefined) return [];
+            var values = typeof value === "string" ? [value] : value;
+            if (!Array.isArray(values)) return null;
+            var packs = [];
+            for (var i = 0; i < values.length; i++) {
+                if (typeof values[i] !== "string" || !/^items\d+$/.test(values[i])) return null;
+                if (packs.indexOf(values[i]) < 0) packs.push(values[i]);
+            }
+            return packs;
+        }
+
+        // 所在フロアでデータを読み込み、別フロアとの比較にも使えるスナップショットを保持する
+        function loadPack(pack) {
+            return visitPack(pack).then(function () {
+                if (!character.bank || !Array.isArray(character.bank[pack])) {
+                    throw new Error("預かり欄を読み込めません: " + pack);
+                }
+                snapshots[pack] = character.bank[pack].slice(0, 42);
+            });
+        }
+
+        // 全ての指定倉庫を先に読み込み、利用できない欄は除外して残りをまとめて扱う
+        function loadPacks(packs, available, index) {
+            if (index >= packs.length) return Promise.resolve();
+            var pack = packs[index];
+            // 正常に取得できた欄だけを保管・集計対象に加える
+            return loadPack(pack).then(function () { available.push(pack); },
+            // 未解放や移動失敗は記録し、他の欄の読み込みを続ける
+            function (error) {
+                ok = false;
+                root.App.Common.log(pack + " の整理をスキップしました: " +
+                    root.App.Common.formatError(error), "orange");
+            // 次の欄の読み込みへ進む
+            }).then(function () { return loadPacks(packs, available, index + 1); });
+        }
+
+        // 既存の合成種別設定に合うアイテムかを判定する
+        function isTarget(item) {
+            var definition = item && G.items && G.items[item.name];
+            return !!(definition && definition.compound && Array.isArray(types) &&
+                (!types.length || types.indexOf(definition.type) >= 0));
+        }
+
+        // 実際に使えるインベントリの空き枠を数える
+        function freeSlots() {
+            var size = Number.isInteger(character.isize) ? character.isize : character.items.length;
+            var count = 0;
+            for (var i = 0; i < size; i++) if (!character.items[i]) count++;
+            return count;
+        }
+
+        // 読み込み済みの銀行欄を取得し、複数フロアの在庫を同時に比較できるようにする
+        function bankItems(pack) {
+            if (character.rip || !Array.isArray(snapshots[pack])) {
+                throw new Error("預かり欄を操作できません: " + pack);
+            }
+            return snapshots[pack];
+        }
+
+        // 非スタックのアクセサリを預けられる空きがあるか調べる
+        function hasBankSpace(pack) {
+            var bank = bankItems(pack);
+            for (var i = 0; i < 42; i++) if (!bank[i]) return true;
+            return false;
+        }
+
+        // 銀行に空きがある場合だけ全数を預け、満杯や個別エラーはスキップする
+        function storeSlot(pack, slot) {
+            var item = character.items[slot];
+            if (!item || item.b) return Promise.resolve(false);
+            if (!hasBankSpace(pack)) return Promise.resolve(false);
+            var label = item.name + " Lv." + (item.level || 0);
+            // 格納先は自動選択にして既存の銀行アイテムとの入れ替えを防ぐ
+            return loadPack(pack).then(function () {
+                if (!hasBankSpace(pack)) return false;
+                return bank_store(slot, pack);
+            })
+                // 預け入れの完了応答を確認する
+                .then(function (result) {
+                    if (result === false) return false;
+                    if (result && (result.failed || result.success === false)) throw result;
+                    snapshots[pack] = character.bank[pack].slice(0, 42);
+                    root.App.Common.log(label + " を " + pack + " へ預けました", "green");
+                    return true;
+                // 個別の失敗を記録し、他のアイテムの整理を続ける
+                }).catch(function (error) {
+                    ok = false;
+                    root.App.Common.log(label + " を預けられませんでした: " +
+                        root.App.Common.formatError(error), "orange");
+                    return false;
+                });
+        }
+
+        // 指定順に空きのある倉庫を試し、全倉庫で預けられない品は所持品へ残す
+        function storeAny(packs, slot, index) {
+            if (!character.items[slot]) return Promise.resolve(true);
+            if (index >= packs.length) {
+                ok = false;
+                root.App.Common.log("指定倉庫へ預けられないため " + character.items[slot].name + " を手元に残します", "orange");
+                return Promise.resolve(false);
+            }
+            if (!hasBankSpace(packs[index])) return storeAny(packs, slot, index + 1);
+            // 満杯または個別エラーの場合は次の指定倉庫を試す
+            return storeSlot(packs[index], slot).then(function (stored) {
+                return stored ? true : storeAny(packs, slot, index + 1);
+            });
+        }
+
+        // 指定したインベントリスロットを、空きのある指定倉庫へ一つずつ預ける
+        function storeSlots(packs, slots, index) {
+            if (index >= slots.length) return Promise.resolve();
+            // 完了後に次のスロットへ進む
+            return storeAny(packs, slots[index], 0).then(function () { return storeSlots(packs, slots, index + 1); });
+        }
+
+        // 合成可能な未完成品を同じ名前・レベルの組にまとめる
+        function matchesGroup(item, group) {
+            return isTarget(item) && !item.l && !item.b && item.name === group.name &&
+                (item.level || 0) === group.level;
+        }
+
+        // 現時点で同じ組に属するインベントリスロットを返す
+        function heldSlots(group) {
+            var slots = [];
+            for (var i = 0; i < character.items.length; i++) {
+                if (matchesGroup(character.items[i], group)) slots.push(i);
+            }
+            return slots;
+        }
+
+        // 倉庫と所持品の合計から、最低1枠空けて持ち帰る3個組を決める
+        function planGroups() {
+            var groups = Object.create(null);
+            var order = [];
+            var movable = 0;
+            // 未完成かつ合成できるアイテムを組ごとに登録する
+            function add(item, slot, held) {
+                if (!isTarget(item) || item.l || item.b || (item.level || 0) > maxLevel) return;
+                var key = JSON.stringify([item.name, item.level || 0]);
+                var group = groups[key];
+                if (!group) {
+                    group = groups[key] = { name: item.name, level: item.level || 0, held: [], bankCount: 0, wanted: 0 };
+                    order.push(group);
+                }
+                if (held) { group.held.push(slot); movable++; }
+                else group.bankCount++;
+            }
+            for (var i = 0; i < character.items.length; i++) add(character.items[i], i, true);
+            for (var p = 0; p < unfinishedPacks.length; p++) {
+                var bank = bankItems(unfinishedPacks[p]);
+                for (var j = 0; j < Math.min(bank.length, 42); j++) add(bank[j], j, false);
+            }
+            // 所持品を多く使える組を優先して、不要な預け入れと取り出しを減らす
+            order.sort(function (a, b) { return b.held.length - a.held.length; });
+            var capacity = Math.max(0, freeSlots() + movable - 1);
+            for (var k = 0; k < order.length; k++) {
+                var group = order[k];
+                group.wanted = Math.min(Math.floor((group.held.length + group.bankCount) / 3) * 3,
+                    Math.floor(capacity / 3) * 3);
+                capacity -= group.wanted;
+            }
+            return order;
+        }
+
+        // 1組分の不足品を取り出し、途中失敗時は今回取り出した品を倉庫へ戻す
+        function retrieveGroup(group) {
+            var held = heldSlots(group).length;
+            var slots = [];
+            for (var p = 0; p < unfinishedPacks.length; p++) {
+                var pack = unfinishedPacks[p];
+                var bank = bankItems(pack);
+                for (var i = 0; i < Math.min(bank.length, 42); i++) {
+                    if (matchesGroup(bank[i], group)) slots.push({ pack: pack, slot: i });
+                }
+            }
+            var desired = Math.min(Math.max(group.wanted, Math.ceil(held / 3) * 3),
+                Math.floor((held + slots.length) / 3) * 3,
+                Math.floor((held + Math.max(0, freeSlots() - 1)) / 3) * 3);
+            var needed = desired - held;
+            if (needed <= 0) return Promise.resolve();
+            var retrieved = [];
+            // 必要な全スロットを確保できる組だけを順に取り出す
+            function take(index) {
+                if (index >= needed) return Promise.resolve();
+                var source = slots[index];
+                var before;
+                // 別フロアの倉庫も、操作直前に移動と最新の在庫確認を行う
+                return loadPack(source.pack).then(function () {
+                    if (freeSlots() <= 1 || !matchesGroup(bankItems(source.pack)[source.slot], group)) {
+                        throw new Error("取り出し対象またはインベントリの空き枠が変わりました");
+                    }
+                    before = character.items.slice();
+                    return bank_retrieve(source.pack, source.slot);
+                })
+                    // 実際に追加されたスロットを記録してから次の品を取り出す
+                    .then(function (result) {
+                        if (result && (result.failed || result.success === false)) throw result;
+                        snapshots[source.pack] = character.bank[source.pack].slice(0, 42);
+                        for (var i = 0; i < character.items.length; i++) {
+                            if (!before[i] && matchesGroup(character.items[i], group)) {
+                                retrieved.push({ slot: i, pack: source.pack });
+                            }
+                        }
+                        if (retrieved.length !== index + 1) throw new Error("取り出したアイテムの反映を確認できません");
+                        return take(index + 1);
+                    });
+            }
+            // 同期エラーも捕捉し、合成できない半端な取り出しをできるだけ残さない
+            return Promise.resolve().then(function () { return take(0); })
+                // 必要数の取り出しが終わったことをログへ表示する
+                .then(function () {
+                    root.App.Common.log(group.name + " Lv." + group.level + " を合成用に " + desired + "個確保しました", "green");
+                // 途中失敗では取り出し元を優先し、空いている未完成倉庫へ今回の取り出し品を戻す
+                }).catch(function (error) {
+                    ok = false;
+                    root.App.Common.log("合成用アイテムの取り出しを中断しました: " +
+                        root.App.Common.formatError(error), "orange");
+                    // 取り出し元ごとに戻し先の優先順位を作り、順に預け直す
+                    function rollback(index) {
+                        if (index >= retrieved.length) return Promise.resolve();
+                        var entry = retrieved[index];
+                        var destinations = [entry.pack];
+                        for (var i = 0; i < unfinishedPacks.length; i++) {
+                            if (unfinishedPacks[i] !== entry.pack) destinations.push(unfinishedPacks[i]);
+                        }
+                        // 今回取り出したスロットだけを預け、元から持っていた品は維持する
+                        return storeAny(destinations, entry.slot, 0).then(function () { return rollback(index + 1); });
+                    }
+                    return rollback(0);
+                });
+        }
+
+        // 不要な端数を預けた後、空き枠の現在値を見ながら各3個組を取り出す
+        function organizeUnfinished() {
+            var groups = planGroups();
+            var excess = [];
+            for (var i = 0; i < groups.length; i++) {
+                excess = excess.concat(groups[i].held.slice(groups[i].wanted));
+            }
+            // 全ての預け入れを先に終えてから、取り出し用の空き枠を使う
+            return storeSlots(unfinishedPacks, excess, 0).then(function () {
+                // 失敗した預け入れで所持数が変わらなかった場合も最新状態で判断する
+                function next(index) {
+                    if (index >= groups.length) return Promise.resolve();
+                    // 今回の組が終わってから次の組へ進む
+                    return retrieveGroup(groups[index]).then(function () { return next(index + 1); });
+                }
+                return next(0);
+            });
+        }
+
+        var hasAccessory = false;
+        var completedSlots = [];
+        for (var i = 0; i < character.items.length; i++) {
+            if (!isTarget(character.items[i])) continue;
+            hasAccessory = true;
+            if ((character.items[i].level || 0) > maxLevel) completedSlots.push(i);
+        }
+        if (!hasAccessory || (unfinished && finished && !unfinished.length && !finished.length)) return Promise.resolve(true);
+        if (!Number.isInteger(maxLevel) || maxLevel < 0 || !unfinished || !finished ||
+            !unfinished.length || !finished.length) {
+            root.App.Common.log("アクセサリ完成・未完成倉庫とmaxCombineLevelの設定を確認してください", "orange");
+            return Promise.resolve(false);
+        }
+        for (var p = 0; p < unfinished.length; p++) {
+            if (finished.indexOf(unfinished[p]) >= 0) {
+                root.App.Common.log("同じ欄を完成倉庫と未完成倉庫の両方に指定できません: " + unfinished[p], "orange");
+                return Promise.resolve(false);
+            }
+        }
+        // 完成品の倉庫が利用できなくても未完成品の整理は続ける
+        return Promise.resolve().then(function () {
+            if (!completedSlots.length) return;
+            // 利用できる全完成倉庫を取得し、指定順に空きのある倉庫へ完成品を預ける
+            return loadPacks(finished, finishedPacks, 0).then(function () {
+                return storeSlots(finishedPacks, completedSlots, 0);
+            });
+        // 完成品を預けられない場合は手元に残して次へ進む
+        }).catch(function (error) {
+            ok = false;
+            root.App.Common.log("完成倉庫の整理をスキップしました: " + root.App.Common.formatError(error), "orange");
+        // 指定した全未完成倉庫の在庫を集めて、所持品と合わせた3個組の整理を行う
+        }).then(function () { return loadPacks(unfinished, unfinishedPacks, 0); })
+            // 一つも利用できない場合は、取り出し計画を作らず所持品をそのまま保持する
+            .then(function () {
+                if (!unfinishedPacks.length) { ok = false; return; }
+                return organizeUnfinished();
+            })
+            // 全処理後も1枠の空きがあることを確認し、確保できない場合は通知する
+            .then(function () {
+                if (freeSlots() < 1) {
+                    ok = false;
+                    root.App.Common.log("倉庫に預けられない品が残り、所持品の空き1枠を確保できませんでした", "orange");
+                }
+                return ok;
+            });
     };
 
     // 設定済みの売却、強化、合成処理を既存の順番で実行する

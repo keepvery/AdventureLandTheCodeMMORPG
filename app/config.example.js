@@ -91,6 +91,12 @@ window.CONFIG = {
                     sshield: 4,
                     mushroomstaff: 5 // キノコ杖
                 },
+                // 既存スタックへの預け先を確認順に指定（例: ["items3", "items2"]、[]でスタック預け入れのみ無効）
+                bankDepositPacks: ["items3"],
+                // 未完成倉庫の配列。全倉庫と所持品をまとめて比較（例: ["items4", "items5"]）
+                accessoryUnfinishedBankPack: ["items4"],
+                // 完成倉庫の配列。指定順に空きのある欄へ預ける（例: ["items1", "items2"]）
+                accessoryFinishedBankPack: ["items1"],
                 // itemName は商品名、slot は露店側の出品枠、price は販売価格、quantity は出品個数
                 standListings: [
                     { slot: 1, itemName: "cclaw", price: 99999999, quantity: 5 },

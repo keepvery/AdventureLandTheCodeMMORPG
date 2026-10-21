@@ -363,54 +363,112 @@
                 return returnHome();
             });
     };
-    // 整理後も持ち物が満杯ならLidiaに重ねられる所持品を預け、ホームで露店を再開する
-    Merchant.prototype.storeMaterialsIfFull = function () {
-        if (character.ctype !== "merchant" || character.esize !== 0) return Promise.resolve(true);
+    // 満杯時または手動実行時に銀行でスタック・アクセサリを整理し、ホームで露店を再開する
+    Merchant.prototype.storeMaterialsIfFull = function (force) {
+        if (character.ctype !== "merchant" || (!force && character.esize !== 0)) return Promise.resolve(true);
         var self = this;
         var home = this.options.homePosition;
-        var pack = "items3";
-        var npcs = G.maps && G.maps.bank && G.maps.bank.npcs || [];
-        var destination = null;
-        for (var i = 0; i < npcs.length; i++) {
-            if (npcs[i].id === pack && Array.isArray(npcs[i].position)) {
-                destination = { map: "bank", x: npcs[i].position[0], y: npcs[i].position[1] };
-                break;
-            }
+        var configuredPacks = this.options.bankDepositPacks;
+        if (configuredPacks === undefined) configuredPacks = ["items3"];
+        if (!Array.isArray(configuredPacks)) {
+            root.App.Common.log("bankDepositPacks は預かり欄IDの配列で設定してください", "red");
+            return Promise.resolve(false);
         }
+        // 同じ欄への二重訪問を避け、指定順を維持する
+        var packs = configuredPacks.filter(function (pack, index, all) {
+            return all.indexOf(pack) === index;
+        });
+        var accessoryPacks = this.options.accessoryUnfinishedBankPack;
+        var hasAccessoryPacks = typeof accessoryPacks === "string" ? !!accessoryPacks :
+            Array.isArray(accessoryPacks) && accessoryPacks.length > 0;
+        if (!packs.length && !force && !hasAccessoryPacks) return Promise.resolve(true);
         if (!home || typeof home.map !== "string" || !Number.isFinite(home.x) ||
-            !Number.isFinite(home.y) || !destination) {
-            root.App.Common.log("銀行への移動先またはhomePositionを確認してください", "red");
+            !Number.isFinite(home.y)) {
+            root.App.Common.log("homePositionを確認してください", "red");
             return Promise.resolve(false);
         }
         var ok = true;
+        var preparedBankMap = null;
 
-        // 指定地点への移動完了と到着位置を確認し、失敗時は後続操作を行わない
-        function moveTo(position) {
-            return Promise.resolve().then(function () {
-                if (character.rip) throw new Error("死亡中のため銀行への往復を中断しました");
-                return smart_move(position);
-            // 移動の成功応答だけでなく、実際に目的地へ着いていることも確認する
-            }).then(function (result) {
-                if (result && (result.failed || result.success === false)) throw result;
-                if (character.map !== position.map || parent.distance(character, position) > 80) {
-                    throw new Error(position.map + " の目的地へ到着できませんでした");
+        // ゲームデータから預かり欄を操作できる銀行フロアだけを探す
+        function getBankMap(pack) {
+            if (typeof pack !== "string" || !/^items\d+$/.test(pack)) return null;
+            var maps = G.maps || {};
+            var mapNames = Object.keys(maps);
+            for (var i = 0; i < mapNames.length; i++) {
+                var mapName = mapNames[i];
+                if (maps[mapName].ignore) continue;
+                var npcs = maps[mapName].npcs || [];
+                for (var j = 0; j < npcs.length; j++) {
+                    var npc = npcs[j];
+                    if (npc.id === pack) return mapName;
                 }
+            }
+            return null;
+        }
+
+        // マップまたは座標への到着を確認し、長時間終わらない移動は中断する
+        function moveTo(position) {
+            // タイムアウトも含めて移動結果を一度だけ確定する
+            return new Promise(function (resolve, reject) {
+                var settled = false;
+                // 遅れて届いた移動応答を無視し、待機タイマーを解除する
+                function finish(error) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    if (error) reject(error);
+                    else resolve();
+                }
+                // 移動が永久待機した場合でも銀行処理から帰還処理へ進める
+                var timer = setTimeout(function () {
+                    if (settled) return;
+                    try { stop("move"); } catch (error) { /* 停止できなくても待機は終了する */ }
+                    finish(new Error(position.map + " への移動が90秒以内に完了しませんでした"));
+                }, 90 * 1000);
+                // Promiseを返すゲームの移動APIへ処理を委譲する
+                Promise.resolve().then(function () {
+                    if (character.rip) throw new Error("死亡中のため銀行への往復を中断しました");
+                    return smart_move(position);
+                // マップのみの指定ではNPC座標へ向かわず、銀行入場だけを確認する
+                }).then(function (result) {
+                    if (result && (result.failed || result.success === false)) throw result;
+                    var hasPosition = Number.isFinite(position.x) && Number.isFinite(position.y);
+                    if (character.map !== position.map ||
+                        (hasPosition && parent.distance(character, position) > 80)) {
+                        throw new Error(position.map + " の目的地へ到着できませんでした");
+                    }
+                    finish();
+                // 同期例外と移動失敗の両方を呼び出し元へ伝える
+                }).catch(finish);
             });
         }
 
+        // 銀行へ入ったら一度だけ少し上へ進み、入口付近で立ち止まらないようにする
+        function stepAside(mapName) {
+            var distances = [50, 30, 15];
+            for (var i = 0; i < distances.length; i++) {
+                var x = character.x;
+                var y = character.y - distances[i];
+                if (can_move_to(x, y)) return moveTo({ map: mapName, x: x, y: y });
+            }
+            // 上に壁がある場合は無理に経路探索せず、現在位置で整理する
+            return Promise.resolve();
+        }
+
         // 銀行入場後のデータ反映を最大10秒待ち、未解放の欄は自動購入しない
-        function waitForBank() {
+        function waitForBank(pack, mapName) {
             var deadline = Date.now() + 10000;
-            // Lidiaの欄を読み取れるまで短い間隔で確認する
+            // 指定の欄を読み取れるまで短い間隔で確認する
             return new Promise(function (resolve, reject) {
                 // データ取得後は待機を終え、取得できないままの永久待機を防ぐ
                 function check() {
-                    if (character.rip || character.map !== "bank") {
+                    if (character.rip || character.map !== mapName) {
                         reject(new Error("銀行から離れたため預け入れを中断しました"));
                     } else if (character.bank && Array.isArray(character.bank[pack])) {
                         resolve();
                     } else if (Date.now() >= deadline) {
-                        reject(new Error("Lidiaの預かり欄（items3）が未解放、または取得できません"));
+                        reject(new Error("預かり欄（" + pack + "）が未解放、または取得できません"));
                     } else {
                         setTimeout(check, 250);
                     }
@@ -419,20 +477,55 @@
             });
         }
 
-        root.App.Common.log("持ち物が満杯のため、銀行のLidiaへ素材を預けに行きます", "cyan");
-        // 露店を閉じてからLidiaへ移動し、専用APIで預け入れを行う
+        // 同じ銀行フロアの欄はその場で操作し、別フロアの場合だけ入場し直す
+        function visitPack(pack) {
+            var mapName = getBankMap(pack);
+            if (!mapName) return Promise.reject(new Error("預かり欄の銀行フロアが見つかりません: " + pack));
+            if (character.map === mapName && preparedBankMap === mapName) return waitForBank(pack, mapName);
+            // 既に銀行内にいる場合は入口や預かり係へ移動せず、その場から少しだけ上へ進む
+            return Promise.resolve().then(function () {
+                if (character.map !== mapName) return moveTo({ map: mapName });
+            // 入場地点から歩ける範囲で入口を避ける
+            }).then(function () { return stepAside(mapName); })
+                // 同じフロアでは二度目以降の欄切り替えで移動しない
+                .then(function () {
+                    preparedBankMap = mapName;
+                    return waitForBank(pack, mapName);
+                });
+        }
+
+        // 空き枠ができても指定された残りの欄を回り、各欄に重ねられる品をすべて確認する
+        function processPack(index) {
+            if (index >= packs.length) return Promise.resolve();
+            var pack = packs[index];
+            // 対象の銀行フロアで、その欄の読み込みを待つ
+            return visitPack(pack)
+                // この欄の既存スタックと重ねられる所持品だけを預ける
+                .then(function () { return root.App.Items.storeMatchingBankStacks(pack); })
+                // 個別の欄の失敗を記録して、他の欄の処理は継続する
+                .then(function (result) { if (!result) ok = false; }, function (error) {
+                    ok = false;
+                    root.App.Common.log(pack + " への預け入れを中断しました: " +
+                        root.App.Common.formatError(error), "orange");
+                })
+                // 預け入れ後のインベントリで次の預かり欄を確認する
+                .then(function () { return processPack(index + 1); });
+        }
+
+        root.App.Common.log(force ? "銀行のアイテム整理を開始します" :
+            "持ち物が満杯のため、銀行へアイテムを整理しに行きます", "cyan");
+        // 露店を閉じてから指定順に銀行の預かり欄を操作する
         return Promise.resolve().then(function () { return self.closeStand(); })
-            // Lidiaの現在の座標へ移動する
-            .then(function () { return moveTo(destination); })
-            .then(waitForBank)
-            // Lidiaの欄に重ねられる所持品だけを預ける
-            .then(function () { return root.App.Items.storeMatchingBankStacks(pack); })
-            // 預け入れ処理の最終結果を記録する
-            .then(function (result) { ok = result; },
+            // 全預かり欄の確認を開始する
+            .then(function () { return processPack(0); })
+            // スタックの預け入れ後に完成品・未完成品を整理して合成用の組を取り出す
+            .then(function () { return root.App.Items.organizeBankAccessories(self.options, visitPack); })
+            // アクセサリ整理の結果も全体の成否に反映する
+            .then(function (result) { if (!result) ok = false; })
             // 銀行処理に失敗した場合は理由を表示して帰還へ進む
-            function (error) {
+            .catch(function (error) {
                 ok = false;
-                root.App.Common.log("Lidiaへの預け入れを中断しました: " +
+                root.App.Common.log("銀行への預け入れを中断しました: " +
                     root.App.Common.formatError(error), "orange");
             })
             // 預けられる品がない場合や預け入れ失敗時もホームへ帰還する
@@ -444,6 +537,30 @@
             })
             // 露店準備の失敗も含めた結果を呼び出し元へ返す
             .then(function (standOk) { return ok && standOk !== false; });
+    };
+
+    // Bボタンから銀行整理を単発実行し、商人の他作業との競合と連打を防ぐ
+    Merchant.prototype.organizeBank = function () {
+        var self = this;
+        if (this.busy || character.rip) {
+            root.App.Common.log("作業中または死亡中のため銀行整理を開始できません", "orange");
+            return Promise.resolve(false);
+        }
+        this.busy = true;
+        // 手動実行は持ち物の空き枠にかかわらず銀行へ向かう
+        return Promise.resolve().then(function () { return self.storeMaterialsIfFull(true); })
+            // 帰還と露店再開が終わったら受付状態へ戻す
+            .then(function (ok) {
+                self.busy = false;
+                root.App.Common.log(ok ? "銀行整理が完了しました" : "銀行整理が一部中断しました",
+                    ok ? "green" : "orange");
+                return ok;
+            // 移動失敗時にもbusyを解放してエラーを通知する
+            }, function (error) {
+                self.busy = false;
+                root.App.Common.log("銀行整理に失敗しました: " + root.App.Common.formatError(error), "red");
+                return false;
+            });
     };
 
     // ホーム帰還後に露店準備、売却、強化、合成、必要時の銀行往復を実行する
